@@ -1,0 +1,4 @@
+aiogram==3.*
+python-dotenv==1.*
+SQLAlchemy==2.*
+psycopg2-binary==2.*      # если будет PostgreSQL

@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite:////app/data/db.sqlite3
+    ports:
+      - "8080:8080"
+    restart: always
