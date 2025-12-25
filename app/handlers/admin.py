@@ -22,6 +22,7 @@ ADMIN_SET_GROUP = "Установить группу"
 ADMIN_EXPORT_LOGS = "Выгрузить логи"
 ADMIN_FIND_PAYMENT = "Найти оплату"
 ADMIN_REBIND_PAYMENT = "Перепривязать оплату"
+ADMIN_REMOVE_USER = "Удалить участника"
 ADMIN_CANCEL = "Отмена"
 
 ADMIN_MENU_BUTTONS = {
@@ -30,6 +31,7 @@ ADMIN_MENU_BUTTONS = {
     ADMIN_EXPORT_LOGS,
     ADMIN_FIND_PAYMENT,
     ADMIN_REBIND_PAYMENT,
+    ADMIN_REMOVE_USER,
     ADMIN_CANCEL,
 }
 
@@ -39,6 +41,7 @@ ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=ADMIN_FIND_PAYMENT)],
         [KeyboardButton(text=ADMIN_EXPORT_LOGS)],
         [KeyboardButton(text=ADMIN_REBIND_PAYMENT)],
+        [KeyboardButton(text=ADMIN_REMOVE_USER)],
     ],
     resize_keyboard=True,
     input_field_placeholder="Выберите действие",
@@ -60,6 +63,7 @@ class AdminStates(StatesGroup):
     find_payment = State()
     rebind_key = State()
     rebind_telegram = State()
+    remove_user = State()
 
 
 def is_admin(message: Message) -> bool:
@@ -302,7 +306,8 @@ async def admin_help(message: Message) -> None:
         "/admin — открыть меню кнопок\n"
         "/find_payment <email, телефон или order_id> — найти оплату и связки\n"
         "/export_logs <YYYY-MM-DD> <YYYY-MM-DD> [название группы] — CSV выгрузка\n"
-        "/rebind_payment <email|телефон|order_id> <telegram_id> — перепривязать оплату"
+        "/rebind_payment <email|телефон|order_id> <telegram_id> — перепривязать оплату\n"
+        "В меню есть кнопка «Удалить участника»"
     )
 
 
@@ -498,6 +503,17 @@ async def admin_rebind_start(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(F.text == ADMIN_REMOVE_USER)
+async def admin_remove_user_start(message: Message, state: FSMContext) -> None:
+    if not is_admin(message):
+        return
+    await state.set_state(AdminStates.remove_user)
+    await message.answer(
+        "Введи email, телефон или order_id участника для удаления из группы.",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
 @router.message(AdminStates.rebind_key)
 async def admin_rebind_key(message: Message, state: FSMContext) -> None:
     if not is_admin(message) or not message.text:
@@ -539,6 +555,98 @@ async def admin_rebind_telegram(message: Message, state: FSMContext) -> None:
 
     await rebind_payment_to_user(message, payment_key, telegram_id)
     await state.clear()
+
+
+@router.message(AdminStates.remove_user)
+async def admin_remove_user(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    text = message.text.strip()
+    if text == ADMIN_CANCEL:
+        await admin_cancel(message, state)
+        return
+
+    db: Session = SessionLocal()
+    try:
+        phone, phone_last10 = phone_variants(text)
+        filters = [Payment.email == text, Payment.order_id == text]
+        if phone:
+            filters.append(Payment.phone == phone)
+        if phone_last10 and len(phone_last10) >= 10:
+            filters.append(Payment.phone.endswith(phone_last10))
+
+        payment = (
+            db.query(Payment)
+            .filter(or_(*filters))
+            .order_by(Payment.id.desc())
+            .first()
+        )
+        if not payment:
+            await message.answer("Оплата не найдена.", reply_markup=ADMIN_MENU_KEYBOARD)
+            await state.clear()
+            return
+
+        user = payment.user
+        if not user or not user.telegram_id or not user.telegram_id.isdigit():
+            await message.answer(
+                "Пользователь не привязан к этой оплате.",
+                reply_markup=ADMIN_MENU_KEYBOARD,
+            )
+            await state.clear()
+            return
+
+        if message.from_user and str(message.from_user.id) == user.telegram_id:
+            await message.answer(
+                "Нельзя удалить самого себя.",
+                reply_markup=ADMIN_MENU_KEYBOARD,
+            )
+            await state.clear()
+            return
+
+        current_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
+        if not current_group or not current_group.chat_id:
+            await message.answer(
+                "Не вижу chat_id группы. Отправьте тестовую заявку на вступление,"
+                " чтобы бот сохранил chat_id.",
+                reply_markup=ADMIN_MENU_KEYBOARD,
+            )
+            await state.clear()
+            return
+
+        try:
+            await message.bot.ban_chat_member(
+                chat_id=int(current_group.chat_id),
+                user_id=int(user.telegram_id),
+            )
+        except Exception:
+            await message.answer(
+                "Не удалось удалить пользователя. Проверь права бота.",
+                reply_markup=ADMIN_MENU_KEYBOARD,
+            )
+            await state.clear()
+            return
+
+        log = AccessLog(
+            telegram_id=user.telegram_id,
+            email=payment.email or "unknown",
+            order_id=payment.order_id or "unknown",
+            group_name=current_group.group_name,
+            group_id=current_group.chat_id,
+            action="revoked",
+            timestamp=datetime.utcnow(),
+            comment="Removed by admin",
+        )
+        db.add(log)
+        db.commit()
+
+        await message.answer(
+            "Пользователь удалён из группы и заблокирован.",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
+    finally:
+        await state.clear()
+        db.close()
 
 
 @router.message(Command("find_payment"))
