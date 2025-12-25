@@ -23,6 +23,7 @@ ADMIN_EXPORT_LOGS = "Выгрузить логи"
 ADMIN_FIND_PAYMENT = "Найти оплату"
 ADMIN_REBIND_PAYMENT = "Перепривязать оплату"
 ADMIN_REMOVE_USER = "Удалить участника"
+ADMIN_UNBAN_USER = "Разбанить участника"
 ADMIN_CANCEL = "Отмена"
 
 ADMIN_MENU_BUTTONS = {
@@ -32,6 +33,7 @@ ADMIN_MENU_BUTTONS = {
     ADMIN_FIND_PAYMENT,
     ADMIN_REBIND_PAYMENT,
     ADMIN_REMOVE_USER,
+    ADMIN_UNBAN_USER,
     ADMIN_CANCEL,
 }
 
@@ -42,6 +44,7 @@ ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=ADMIN_EXPORT_LOGS)],
         [KeyboardButton(text=ADMIN_REBIND_PAYMENT)],
         [KeyboardButton(text=ADMIN_REMOVE_USER)],
+        [KeyboardButton(text=ADMIN_UNBAN_USER)],
     ],
     resize_keyboard=True,
     input_field_placeholder="Выберите действие",
@@ -64,6 +67,7 @@ class AdminStates(StatesGroup):
     rebind_key = State()
     rebind_telegram = State()
     remove_user = State()
+    unban_user = State()
 
 
 def is_admin(message: Message) -> bool:
@@ -642,6 +646,102 @@ async def admin_remove_user(message: Message, state: FSMContext) -> None:
 
         await message.answer(
             "Пользователь удалён из группы и заблокирован.",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
+    finally:
+        await state.clear()
+        db.close()
+
+
+@router.message(F.text == ADMIN_UNBAN_USER)
+async def admin_unban_user_start(message: Message, state: FSMContext) -> None:
+    if not is_admin(message):
+        return
+    await state.set_state(AdminStates.unban_user)
+    await message.answer(
+        "Введи email, телефон или order_id участника для разбана.",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
+@router.message(AdminStates.unban_user)
+async def admin_unban_user(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    text = message.text.strip()
+    if text == ADMIN_CANCEL:
+        await admin_cancel(message, state)
+        return
+
+    db: Session = SessionLocal()
+    try:
+        phone, phone_last10 = phone_variants(text)
+        filters = [Payment.email == text, Payment.order_id == text]
+        if phone:
+            filters.append(Payment.phone == phone)
+        if phone_last10 and len(phone_last10) >= 10:
+            filters.append(Payment.phone.endswith(phone_last10))
+
+        payment = (
+            db.query(Payment)
+            .filter(or_(*filters))
+            .order_by(Payment.id.desc())
+            .first()
+        )
+        if not payment:
+            await message.answer("Оплата не найдена.", reply_markup=ADMIN_MENU_KEYBOARD)
+            await state.clear()
+            return
+
+        user = payment.user
+        if not user or not user.telegram_id or not user.telegram_id.isdigit():
+            await message.answer(
+                "Пользователь не привязан к этой оплате.",
+                reply_markup=ADMIN_MENU_KEYBOARD,
+            )
+            await state.clear()
+            return
+
+        current_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
+        if not current_group or not current_group.chat_id:
+            await message.answer(
+                "Не вижу chat_id группы. Отправьте тестовую заявку на вступление,"
+                " чтобы бот сохранил chat_id.",
+                reply_markup=ADMIN_MENU_KEYBOARD,
+            )
+            await state.clear()
+            return
+
+        try:
+            await message.bot.unban_chat_member(
+                chat_id=int(current_group.chat_id),
+                user_id=int(user.telegram_id),
+                only_if_banned=True,
+            )
+        except Exception:
+            await message.answer(
+                "Не удалось разбанить пользователя. Проверь права бота.",
+                reply_markup=ADMIN_MENU_KEYBOARD,
+            )
+            await state.clear()
+            return
+
+        log = AccessLog(
+            telegram_id=user.telegram_id,
+            email=payment.email or "unknown",
+            order_id=payment.order_id or "unknown",
+            group_name=current_group.group_name,
+            group_id=current_group.chat_id,
+            action="unbanned",
+            timestamp=datetime.utcnow(),
+            comment="Unbanned by admin",
+        )
+        db.add(log)
+        db.commit()
+
+        await message.answer(
+            f"Пользователь разбанен. Теперь он может снова подать заявку на вступление в группу.",
             reply_markup=ADMIN_MENU_KEYBOARD,
         )
     finally:
