@@ -165,7 +165,7 @@ async def set_group(message: Message) -> None:
         db.close()
 
 
-@dp.message(F.text == BUTTON_CHECK_PAYMENT)
+@dp.message(F.chat.type == "private", F.text == BUTTON_CHECK_PAYMENT)
 async def prompt_payment_check(message: Message) -> None:
     await message.answer(
         "Введите email или телефон, который вы указали при оплате.",
@@ -173,7 +173,7 @@ async def prompt_payment_check(message: Message) -> None:
     )
 
 
-@dp.message(F.text == BUTTON_SUPPORT)
+@dp.message(F.chat.type == "private", F.text == BUTTON_SUPPORT)
 async def show_support(message: Message, state: FSMContext) -> None:
     await state.set_state(SupportStates.waiting_message)
     lines = [
@@ -292,6 +292,7 @@ async def handle_admin_reply(message: Message, state: FSMContext) -> None:
 
 @dp.message(
     StateFilter(None),
+    F.chat.type == "private",
     F.text & ~F.text.startswith("/") & ~F.text.in_(ADMIN_MENU_BUTTONS),
 )
 async def handle_email_or_order(message: Message) -> None:
