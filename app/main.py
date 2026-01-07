@@ -202,9 +202,14 @@ async def handle_support_message(message: Message, state: FSMContext) -> None:
         return
 
     user = message.from_user
-    user_label = f"{user.full_name} (id {user.id})" if user else "Неизвестный пользователь"
-    if user and user.username:
-        user_label = f"{user.full_name} (@{user.username}, id {user.id})"
+    if user:
+        if user.username:
+            user_label = f"{user.full_name} (@{user.username}, id {user.id})"
+        else:
+            # Create tg://user link for users without username
+            user_label = f'<a href="tg://user?id={user.id}">{user.full_name}</a> (id {user.id})'
+    else:
+        user_label = "Неизвестный пользователь"
 
     if ADMIN_IDS:
         reply_markup = InlineKeyboardMarkup(
@@ -224,6 +229,7 @@ async def handle_support_message(message: Message, state: FSMContext) -> None:
                 f"{user_label}\n"
                 f"Сообщение: {text}",
                 reply_markup=reply_markup,
+                parse_mode="HTML",
             )
 
     await state.clear()
