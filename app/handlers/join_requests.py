@@ -20,7 +20,7 @@ async def approve_join_request(event: ChatJoinRequest) -> None:
             return
 
         payment = user.payment
-        if not payment or payment.status != "paid" or not payment.used:
+        if not payment or payment.status != "paid":
             return
 
         current_group = (
@@ -43,6 +43,10 @@ async def approve_join_request(event: ChatJoinRequest) -> None:
             comment="Auto-approved join request",
         )
         db.add(log)
+        
+        # Mark payment as used ONLY when they actually join
+        payment.used = True
+        
         db.commit()
 
         await event.approve()

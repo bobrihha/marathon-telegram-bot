@@ -315,11 +315,10 @@ async def handle_email_or_order(message: Message) -> None:
                 .filter(
                     Payment.email == text,
                     Payment.status == "paid",
-                    Payment.used.is_(False),
-                )
                 .order_by(Payment.created_at.desc(), Payment.id.desc())
                 .first()
             )
+            # Find any paid payment (even if used) to check if it's already linked to THIS user
             used_payment = (
                 db.query(Payment)
                 .filter(Payment.email == text, Payment.status == "paid")
@@ -334,11 +333,12 @@ async def handle_email_or_order(message: Message) -> None:
                 filters.append(Payment.phone.endswith(phone_last10))
             payment = (
                 db.query(Payment)
-                .filter(Payment.status == "paid", Payment.used.is_(False))
+                .filter(Payment.status == "paid")
                 .filter(or_(*filters))
                 .order_by(Payment.created_at.desc(), Payment.id.desc())
                 .first()
             )
+            # Find any paid payment (even if used) to check if it's already linked to THIS user
             used_payment = (
                 db.query(Payment)
                 .filter(Payment.status == "paid")
@@ -349,12 +349,18 @@ async def handle_email_or_order(message: Message) -> None:
 
         if not payment:
             if used_payment:
-                await message.answer(
-                    "Эта оплата уже использована для доступа.\n"
-                    "Если вы оплатили новый поток, пожалуйста, укажите "
-                    "новый email/телефон или напишите в поддержку."
-                )
-                return
+                # Check if this used payment BELONGS TO THE CURRENT USER
+                # If so, we should allow them to see the link again!
+                existing_user = db.query(User).filter(User.payment_id == used_payment.id).first()
+                if existing_user and existing_user.telegram_id == str(message.from_user.id):
+                    payment = used_payment  # Treat it as valid for this specific user
+                else:
+                    await message.answer(
+                        "Эта оплата уже использована другим пользователем или для доступа.\n"
+                        "Если вы оплатили новый поток, пожалуйста, укажите "
+                        "новый email/телефон или напишите в поддержку."
+                    )
+                    return
 
             await message.answer(
                 "Я не нашёл оплаченный заказ по этим данным.\n"
@@ -383,7 +389,10 @@ async def handle_email_or_order(message: Message) -> None:
         else:
             user.payment_id = payment.id
 
-        payment.used = True
+        else:
+            user.payment_id = payment.id
+
+        # payment.used = True  <-- MOVED to join_requests.py (only when they actually join)
 
         current_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
         if not current_group:
