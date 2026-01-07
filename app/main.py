@@ -321,6 +321,8 @@ async def handle_email_or_order(message: Message) -> None:
                 .filter(
                     Payment.email == text,
                     Payment.status == "paid",
+                    Payment.used.is_(False),
+                )
                 .order_by(Payment.created_at.desc(), Payment.id.desc())
                 .first()
             )
@@ -392,9 +394,6 @@ async def handle_email_or_order(message: Message) -> None:
                 payment_id=payment.id,
             )
             db.add(user)
-        else:
-            user.payment_id = payment.id
-
         else:
             user.payment_id = payment.id
 
