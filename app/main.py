@@ -15,7 +15,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from .config import ADMIN_IDS, BOT_TOKEN, SUPPORT_CONTACT
@@ -316,10 +316,11 @@ async def handle_email_or_order(message: Message) -> None:
     try:
         phone, phone_last10 = phone_variants(text)
         if "@" in text:
+            email_lower = text.lower()
             payment = (
                 db.query(Payment)
                 .filter(
-                    Payment.email == text,
+                    func.lower(Payment.email) == email_lower,
                     Payment.status == "paid",
                     Payment.used.is_(False),
                 )
@@ -329,7 +330,7 @@ async def handle_email_or_order(message: Message) -> None:
             # Find any paid payment (even if used) to check if it's already linked to THIS user
             used_payment = (
                 db.query(Payment)
-                .filter(Payment.email == text, Payment.status == "paid")
+                .filter(func.lower(Payment.email) == email_lower, Payment.status == "paid")
                 .order_by(Payment.created_at.desc(), Payment.id.desc())
                 .first()
             )
