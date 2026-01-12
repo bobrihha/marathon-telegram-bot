@@ -43,7 +43,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=BUTTON_SUPPORT)],
     ],
     resize_keyboard=True,
-    input_field_placeholder="Введите email или телефон для проверки оплаты",
+    input_field_placeholder="Введите номер телефона для проверки оплаты",
 )
 
 SUPPORT_KEYBOARD = ReplyKeyboardMarkup(
@@ -90,7 +90,7 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Я бот марафона.\n\n"
         "Я буду выдавать доступ в закрытую группу после оплаты.\n"
-        "Нажми кнопку ниже и отправь свой email или телефон для проверки оплаты.",
+        "Нажми кнопку ниже и отправь номер телефона, который ты указал(а) при оплате.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -168,7 +168,7 @@ async def set_group(message: Message) -> None:
 @dp.message(F.chat.type == "private", F.text == BUTTON_CHECK_PAYMENT)
 async def prompt_payment_check(message: Message) -> None:
     await message.answer(
-        "Введите email или телефон, который вы указали при оплате.",
+        "Введите номер телефона, который вы указали при оплате.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -373,7 +373,7 @@ async def handle_email_or_order(message: Message) -> None:
 
             await message.answer(
                 "Я не нашёл оплаченный заказ по этим данным.\n"
-                "Проверь, пожалуйста, правильно ли ты ввёл адрес, "
+                "Проверь, пожалуйста, правильно ли ты ввёл номер телефона, "
                 "или напиши в поддержку."
             )
             return
