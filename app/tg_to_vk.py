@@ -72,6 +72,50 @@ async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
     return f"photo{p['owner_id']}_{p['id']}"
 
 
+async def _upload_doc_to_vk(
+    doc_bytes: bytes, filename: str, title: str | None = None
+) -> str | None:
+    """Upload a document/audio to VK and return attachment string like 'doc123_456'."""
+    # Step 1: get upload URL
+    resp = await _vk_api(
+        "docs.getWallUploadServer",
+        group_id=VK_TARGET_GROUP_ID,
+    )
+    upload_url = resp.get("response", {}).get("upload_url")
+    if not upload_url:
+        logger.error("Failed to get VK doc upload URL: %s", resp)
+        return None
+
+    # Step 2: upload the file
+    form = aiohttp.FormData()
+    form.add_field("file", doc_bytes, filename=filename)
+    async with aiohttp.ClientSession() as session:
+        async with session.post(upload_url, data=form) as upload_resp:
+            upload_result = await upload_resp.json()
+
+    file_field = upload_result.get("file")
+    if not file_field:
+        logger.error("VK doc upload failed: %s", upload_result)
+        return None
+
+    # Step 3: save the document
+    save_params = {"file": file_field}
+    if title:
+        save_params["title"] = title
+    save_resp = await _vk_api("docs.save", **save_params)
+    doc_info = save_resp.get("response")
+    if not doc_info:
+        logger.error("VK doc save failed: %s", save_resp)
+        return None
+
+    # VK returns different structure for docs
+    doc_type = doc_info.get("type")
+    doc_obj = doc_info.get(doc_type, doc_info.get("doc"))
+    if doc_obj:
+        return f"doc{doc_obj['owner_id']}_{doc_obj['id']}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 #  Topic name → hashtag
 # ---------------------------------------------------------------------------
@@ -146,7 +190,6 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
 
     # Handle photos
     if message.photo:
-        # Get the largest photo
         photo = message.photo[-1]
         try:
             file = await bot.get_file(photo.file_id)
@@ -157,6 +200,37 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
                 attachments.append(attachment)
         except Exception as e:
             logger.error("Failed to download/upload photo: %s", e)
+
+    # Handle documents (PDF, etc.)
+    if message.document:
+        try:
+            file = await bot.get_file(message.document.file_id)
+            doc_data = await bot.download_file(file.file_path)
+            doc_bytes = doc_data.read()
+            fname = message.document.file_name or "document"
+            attachment = await _upload_doc_to_vk(doc_bytes, fname, fname)
+            if attachment:
+                attachments.append(attachment)
+        except Exception as e:
+            logger.error("Failed to download/upload document: %s", e)
+
+    # Handle audio / voice
+    audio_file = message.audio or message.voice
+    if audio_file:
+        try:
+            file = await bot.get_file(audio_file.file_id)
+            audio_data = await bot.download_file(file.file_path)
+            audio_bytes = audio_data.read()
+            fname = getattr(audio_file, "file_name", None) or "audio.ogg"
+            attachment = await _upload_doc_to_vk(audio_bytes, fname, fname)
+            if attachment:
+                attachments.append(attachment)
+        except Exception as e:
+            logger.error("Failed to download/upload audio: %s", e)
+
+    # Handle video (as a link in text, can't easily upload)
+    if message.video and not attachments:
+        text += "\n\n🎥 [видео — см. оригинал в Telegram]"
 
     # Post to VK wall
     if not text and not attachments:
@@ -213,6 +287,37 @@ async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
                 attachments.append(attachment)
         except Exception as e:
             logger.error("Failed to download/upload forwarded photo: %s", e)
+
+    # Handle documents (PDF, etc.)
+    if message.document:
+        try:
+            file = await bot.get_file(message.document.file_id)
+            doc_data = await bot.download_file(file.file_path)
+            doc_bytes = doc_data.read()
+            fname = message.document.file_name or "document"
+            attachment = await _upload_doc_to_vk(doc_bytes, fname, fname)
+            if attachment:
+                attachments.append(attachment)
+        except Exception as e:
+            logger.error("Failed to download/upload forwarded document: %s", e)
+
+    # Handle audio / voice
+    audio_file = message.audio or message.voice
+    if audio_file:
+        try:
+            file = await bot.get_file(audio_file.file_id)
+            audio_data = await bot.download_file(file.file_path)
+            audio_bytes = audio_data.read()
+            fname = getattr(audio_file, "file_name", None) or "audio.ogg"
+            attachment = await _upload_doc_to_vk(audio_bytes, fname, fname)
+            if attachment:
+                attachments.append(attachment)
+        except Exception as e:
+            logger.error("Failed to download/upload forwarded audio: %s", e)
+
+    # Handle video
+    if message.video and not attachments:
+        text += "\n\n🎥 [видео — см. оригинал в Telegram]"
 
     if not text and not attachments:
         await message.reply("Не удалось извлечь контент из сообщения.")
