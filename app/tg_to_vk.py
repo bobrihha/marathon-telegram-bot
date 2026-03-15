@@ -76,9 +76,9 @@ async def _upload_doc_to_vk(
     doc_bytes: bytes, filename: str, title: str | None = None
 ) -> str | None:
     """Upload a document/audio to VK and return attachment string like 'doc123_456'."""
-    # Step 1: get upload URL (no group_id — community tokens can't upload docs to groups directly)
+    # Step 1: get upload URL (use docs.getUploadServer — community tokens don't support getWallUploadServer)
     resp = await _vk_api(
-        "docs.getWallUploadServer",
+        "docs.getUploadServer",
     )
     upload_url = resp.get("response", {}).get("upload_url")
     if not upload_url:
