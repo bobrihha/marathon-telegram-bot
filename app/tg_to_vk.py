@@ -8,7 +8,7 @@ import aiohttp
 from aiogram import Bot, F, Router
 from aiogram.types import Message
 
-from .config import ADMIN_IDS, VK_TARGET_GROUP_ID, VK_TARGET_TOKEN
+from .config import ADMIN_IDS, VK_COMMUNITY_TOKEN, VK_TARGET_GROUP_ID, VK_TARGET_TOKEN
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -21,7 +21,7 @@ router = Router()
 
 async def _vk_api(method: str, **params) -> dict:
     """Call VK API with target community token."""
-    params["access_token"] = VK_TARGET_TOKEN
+    params.setdefault("access_token", VK_TARGET_TOKEN)
     params["v"] = "5.199"
     url = f"https://api.vk.com/method/{method}"
     async with aiohttp.ClientSession() as session:
@@ -75,10 +75,13 @@ async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
 async def _upload_doc_to_vk(
     doc_bytes: bytes, filename: str, title: str | None = None
 ) -> str | None:
-    """Upload a document/audio to VK and return attachment string like 'doc123_456'."""
-    # Step 1: get upload URL (use docs.getUploadServer — community tokens don't support getWallUploadServer)
+    """Upload a document/audio via bot community (messages upload server)."""
+    # Use BOT community token for docs — target community token can't do docs
     resp = await _vk_api(
-        "docs.getUploadServer",
+        "docs.getMessagesUploadServer",
+        access_token=VK_COMMUNITY_TOKEN,
+        type="doc",
+        peer_id=0,
     )
     upload_url = resp.get("response", {}).get("upload_url")
     if not upload_url:
@@ -98,7 +101,7 @@ async def _upload_doc_to_vk(
         return None
 
     # Step 3: save the document
-    save_params = {"file": file_field}
+    save_params = {"file": file_field, "access_token": VK_COMMUNITY_TOKEN}
     if title:
         save_params["title"] = title
     save_resp = await _vk_api("docs.save", **save_params)
@@ -236,16 +239,36 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
         except Exception as e:
             logger.error("Failed to download/upload photo: %s", e)
 
-    # Handle documents (PDF, etc.) — VK docs API unavailable with community tokens
+    # Handle documents (PDF, etc.)
     if message.document:
-        fname = message.document.file_name or "документ"
-        text += f"\n\n📎 Файл: {fname}\n(см. оригинал в Telegram)"
+        try:
+            file = await bot.get_file(message.document.file_id)
+            doc_data = await bot.download_file(file.file_path)
+            doc_bytes = doc_data.read()
+            fname = message.document.file_name or "document"
+            attachment = await _upload_doc_to_vk(doc_bytes, fname, fname)
+            if attachment:
+                attachments.append(attachment)
+            else:
+                text += f"\n\n📎 Файл: {fname}"
+        except Exception as e:
+            logger.error("Failed to upload document: %s", e)
 
-    # Handle audio / voice — VK docs API unavailable with community tokens
+    # Handle audio / voice
     audio_file = message.audio or message.voice
     if audio_file:
-        fname = getattr(audio_file, "file_name", None) or "аудиозапись"
-        text += f"\n\n🎵 Аудио: {fname}\n(см. оригинал в Telegram)"
+        try:
+            file = await bot.get_file(audio_file.file_id)
+            audio_data = await bot.download_file(file.file_path)
+            audio_bytes = audio_data.read()
+            fname = getattr(audio_file, "file_name", None) or "audio.ogg"
+            attachment = await _upload_doc_to_vk(audio_bytes, fname, fname)
+            if attachment:
+                attachments.append(attachment)
+            else:
+                text += f"\n\n🎵 Аудио: {fname}"
+        except Exception as e:
+            logger.error("Failed to upload audio: %s", e)
 
     # Handle video
     if message.video:
@@ -318,16 +341,36 @@ async def handle_media_to_vk(message: Message, bot: Bot) -> None:
         except Exception as e:
             logger.error("Failed to download/upload photo: %s", e)
 
-    # Handle documents (PDF, etc.) — VK docs API unavailable with community tokens
+    # Handle documents (PDF, etc.)
     if message.document:
-        fname = message.document.file_name or "документ"
-        text += f"\n\n📎 Файл: {fname}\n(см. оригинал в Telegram)"
+        try:
+            file = await bot.get_file(message.document.file_id)
+            doc_data = await bot.download_file(file.file_path)
+            doc_bytes = doc_data.read()
+            fname = message.document.file_name or "document"
+            attachment = await _upload_doc_to_vk(doc_bytes, fname, fname)
+            if attachment:
+                attachments.append(attachment)
+            else:
+                text += f"\n\n📎 Файл: {fname}"
+        except Exception as e:
+            logger.error("Failed to upload document: %s", e)
 
-    # Handle audio / voice — VK docs API unavailable with community tokens
+    # Handle audio / voice
     audio_file = message.audio or message.voice
     if audio_file:
-        fname = getattr(audio_file, "file_name", None) or "аудиозапись"
-        text += f"\n\n🎵 Аудио: {fname}\n(см. оригинал в Telegram)"
+        try:
+            file = await bot.get_file(audio_file.file_id)
+            audio_data = await bot.download_file(file.file_path)
+            audio_bytes = audio_data.read()
+            fname = getattr(audio_file, "file_name", None) or "audio.ogg"
+            attachment = await _upload_doc_to_vk(audio_bytes, fname, fname)
+            if attachment:
+                attachments.append(attachment)
+            else:
+                text += f"\n\n🎵 Аудио: {fname}"
+        except Exception as e:
+            logger.error("Failed to upload audio: %s", e)
 
     # Handle video
     if message.video:
