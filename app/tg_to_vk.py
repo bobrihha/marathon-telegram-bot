@@ -8,20 +8,20 @@ import aiohttp
 from aiogram import Bot, F, Router
 from aiogram.types import Message
 
-from .config import ADMIN_IDS, VK_COMMUNITY_TOKEN, VK_TARGET_GROUP_ID, VK_TARGET_TOKEN
+from .config import ADMIN_IDS, VK_COMMUNITY_TOKEN, VK_GROUP_ID, VK_TARGET_GROUP_ID, VK_TARGET_TOKEN
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 
 # ---------------------------------------------------------------------------
-#  VK API helpers (use target community token)
+#  VK API helpers
 # ---------------------------------------------------------------------------
 
 
-async def _vk_api(method: str, **params) -> dict:
-    """Call VK API with target community token."""
-    params.setdefault("access_token", VK_TARGET_TOKEN)
+async def _vk_api(method: str, token: str | None = None, **params) -> dict:
+    """Call VK API with given token (defaults to VK_TARGET_TOKEN)."""
+    params["access_token"] = token or VK_TARGET_TOKEN
     params["v"] = "5.199"
     url = f"https://api.vk.com/method/{method}"
     async with aiohttp.ClientSession() as session:
@@ -33,18 +33,18 @@ async def _vk_api(method: str, **params) -> dict:
 
 
 async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
-    """Upload a photo to VK and return attachment string like 'photo123_456'."""
-    # Step 1: get upload URL
+    """Upload a photo via bot community and return attachment string."""
+    # Use BOT community token for photo upload
     resp = await _vk_api(
         "photos.getWallUploadServer",
-        group_id=VK_TARGET_GROUP_ID,
+        token=VK_COMMUNITY_TOKEN,
+        group_id=VK_GROUP_ID,
     )
     upload_url = resp.get("response", {}).get("upload_url")
     if not upload_url:
         logger.error("Failed to get VK upload URL: %s", resp)
         return None
 
-    # Step 2: upload the photo
     form = aiohttp.FormData()
     form.add_field("photo", photo_bytes, filename="photo.jpg", content_type="image/jpeg")
     async with aiohttp.ClientSession() as session:
@@ -55,10 +55,10 @@ async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
         logger.error("VK photo upload failed: %s", upload_result)
         return None
 
-    # Step 3: save the photo
     save_resp = await _vk_api(
         "photos.saveWallPhoto",
-        group_id=VK_TARGET_GROUP_ID,
+        token=VK_COMMUNITY_TOKEN,
+        group_id=VK_GROUP_ID,
         photo=upload_result["photo"],
         server=upload_result["server"],
         hash=upload_result["hash"],
@@ -75,20 +75,18 @@ async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
 async def _upload_doc_to_vk(
     doc_bytes: bytes, filename: str, title: str | None = None
 ) -> str | None:
-    """Upload a document/audio via bot community (messages upload server)."""
-    # Use BOT community token for docs — target community token can't do docs
+    """Upload a document/audio via bot community."""
+    # Use BOT community token — target token can't do docs
     resp = await _vk_api(
         "docs.getMessagesUploadServer",
-        access_token=VK_COMMUNITY_TOKEN,
+        token=VK_COMMUNITY_TOKEN,
         type="doc",
-        peer_id=0,
     )
     upload_url = resp.get("response", {}).get("upload_url")
     if not upload_url:
         logger.error("Failed to get VK doc upload URL: %s", resp)
         return None
 
-    # Step 2: upload the file
     form = aiohttp.FormData()
     form.add_field("file", doc_bytes, filename=filename)
     async with aiohttp.ClientSession() as session:
@@ -100,11 +98,10 @@ async def _upload_doc_to_vk(
         logger.error("VK doc upload failed: %s", upload_result)
         return None
 
-    # Step 3: save the document
-    save_params = {"file": file_field, "access_token": VK_COMMUNITY_TOKEN}
+    save_params = {}
     if title:
         save_params["title"] = title
-    save_resp = await _vk_api("docs.save", **save_params)
+    save_resp = await _vk_api("docs.save", token=VK_COMMUNITY_TOKEN, file=file_field, **save_params)
     doc_info = save_resp.get("response")
     if not doc_info:
         logger.error("VK doc save failed: %s", save_resp)
@@ -121,16 +118,15 @@ async def _upload_doc_to_vk(
 async def _upload_video_to_vk(
     video_bytes: bytes, title: str = "Видео", description: str = ""
 ) -> str | None:
-    """Upload a video to VK and return attachment string like 'video123_456'."""
-    # Step 1: create video entry and get upload URL
+    """Upload a video via bot community."""
     params = {
-        "group_id": VK_TARGET_GROUP_ID,
+        "group_id": VK_GROUP_ID,
         "name": title,
-        "wallpost": 0,  # don't auto-post, we'll attach to our post
+        "wallpost": 0,
     }
     if description:
         params["description"] = description
-    resp = await _vk_api("video.save", **params)
+    resp = await _vk_api("video.save", token=VK_COMMUNITY_TOKEN, **params)
     video_info = resp.get("response")
     if not video_info or not video_info.get("upload_url"):
         logger.error("Failed to get VK video upload URL: %s", resp)
@@ -140,7 +136,6 @@ async def _upload_video_to_vk(
     owner_id = video_info["owner_id"]
     video_id = video_info["video_id"]
 
-    # Step 2: upload the video file
     form = aiohttp.FormData()
     form.add_field("video_file", video_bytes, filename="video.mp4", content_type="video/mp4")
     async with aiohttp.ClientSession() as session:
