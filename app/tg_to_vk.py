@@ -116,6 +116,42 @@ async def _upload_doc_to_vk(
     return None
 
 
+async def _upload_video_to_vk(
+    video_bytes: bytes, title: str = "Видео", description: str = ""
+) -> str | None:
+    """Upload a video to VK and return attachment string like 'video123_456'."""
+    # Step 1: create video entry and get upload URL
+    params = {
+        "group_id": VK_TARGET_GROUP_ID,
+        "name": title,
+        "wallpost": 0,  # don't auto-post, we'll attach to our post
+    }
+    if description:
+        params["description"] = description
+    resp = await _vk_api("video.save", **params)
+    video_info = resp.get("response")
+    if not video_info or not video_info.get("upload_url"):
+        logger.error("Failed to get VK video upload URL: %s", resp)
+        return None
+
+    upload_url = video_info["upload_url"]
+    owner_id = video_info["owner_id"]
+    video_id = video_info["video_id"]
+
+    # Step 2: upload the video file
+    form = aiohttp.FormData()
+    form.add_field("video_file", video_bytes, filename="video.mp4", content_type="video/mp4")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(upload_url, data=form) as upload_resp:
+            upload_result = await upload_resp.json()
+
+    if upload_result.get("size", 0) > 0 or upload_result.get("video_id"):
+        return f"video{owner_id}_{video_id}"
+
+    logger.error("VK video upload failed: %s", upload_result)
+    return None
+
+
 # ---------------------------------------------------------------------------
 #  Topic name → hashtag
 # ---------------------------------------------------------------------------
@@ -228,9 +264,19 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
         except Exception as e:
             logger.error("Failed to download/upload audio: %s", e)
 
-    # Handle video (as a link in text, can't easily upload)
-    if message.video and not attachments:
-        text += "\n\n🎥 [видео — см. оригинал в Telegram]"
+    # Handle video
+    if message.video:
+        try:
+            file = await bot.get_file(message.video.file_id)
+            video_data = await bot.download_file(file.file_path)
+            video_bytes = video_data.read()
+            fname = message.video.file_name or "video.mp4"
+            attachment = await _upload_video_to_vk(video_bytes, fname)
+            if attachment:
+                attachments.append(attachment)
+        except Exception as e:
+            logger.error("Failed to download/upload video: %s", e)
+            text += "\n\n🎥 [видео — не удалось загрузить, см. оригинал в Telegram]"
 
     # Post to VK wall
     if not text and not attachments:
@@ -316,8 +362,18 @@ async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
             logger.error("Failed to download/upload forwarded audio: %s", e)
 
     # Handle video
-    if message.video and not attachments:
-        text += "\n\n🎥 [видео — см. оригинал в Telegram]"
+    if message.video:
+        try:
+            file = await bot.get_file(message.video.file_id)
+            video_data = await bot.download_file(file.file_path)
+            video_bytes = video_data.read()
+            fname = message.video.file_name or "video.mp4"
+            attachment = await _upload_video_to_vk(video_bytes, fname)
+            if attachment:
+                attachments.append(attachment)
+        except Exception as e:
+            logger.error("Failed to download/upload video: %s", e)
+            text += "\n\n🎥 [видео — не удалось загрузить, см. оригинал в Telegram]"
 
     if not text and not attachments:
         await message.reply("Не удалось извлечь контент из сообщения.")
