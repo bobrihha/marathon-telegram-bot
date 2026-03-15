@@ -33,6 +33,12 @@ dp = Dispatcher(storage=MemoryStorage())
 dp.include_router(join_router)
 dp.include_router(admin_router)
 
+# TG → VK forwarding (only if configured)
+from .config import VK_TARGET_TOKEN
+if VK_TARGET_TOKEN:
+    from .tg_to_vk import router as tg_to_vk_router
+    dp.include_router(tg_to_vk_router)
+
 BUTTON_CHECK_PAYMENT = "Проверить оплату"
 BUTTON_SUPPORT = "Поддержка"
 SUPPORT_CANCEL = "Отмена"
