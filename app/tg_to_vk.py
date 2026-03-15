@@ -270,7 +270,9 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
             audio_data = await bot.download_file(file.file_path)
             audio_bytes = audio_data.read()
             fname = getattr(audio_file, "file_name", None) or "audio.ogg"
-            attachment = await _upload_doc_to_vk(audio_bytes, fname, fname)
+            # Rename to .dat to prevent VK from rejecting as 'wrong_music_file'
+            upload_fname = fname.rsplit(".", 1)[0] + ".dat" if "." in fname else fname
+            attachment = await _upload_doc_to_vk(audio_bytes, upload_fname, fname)
             if attachment:
                 attachments.append(attachment)
             else:
@@ -372,7 +374,9 @@ async def handle_media_to_vk(message: Message, bot: Bot) -> None:
             audio_data = await bot.download_file(file.file_path)
             audio_bytes = audio_data.read()
             fname = getattr(audio_file, "file_name", None) or "audio.ogg"
-            attachment = await _upload_doc_to_vk(audio_bytes, fname, fname)
+            # Rename to .dat to prevent VK from rejecting as 'wrong_music_file'
+            upload_fname = fname.rsplit(".", 1)[0] + ".dat" if "." in fname else fname
+            attachment = await _upload_doc_to_vk(audio_bytes, upload_fname, fname)
             if attachment:
                 attachments.append(attachment)
             else:
