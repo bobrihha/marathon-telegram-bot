@@ -211,65 +211,39 @@ async def handle_payment_check(vk_user_id: int, text: str) -> None:
 
         db.commit()
 
-        # Try to get VK group info
+        # Try to get VK group/chat info
         vk_group = db.query(VkGroup).order_by(VkGroup.id.desc()).first()
-        if not vk_group:
+        if not vk_group or not vk_group.invite_link:
             await vk_send_message(
                 vk_user_id,
                 "Оплата подтверждена ✅\n"
-                "Но пока не настроена ВК-группа для выдачи доступа.\n"
+                "Но пока не настроен ВК-чат для выдачи доступа.\n"
                 "Свяжись с администратором марафона.",
                 keyboard=main_keyboard(),
             )
             return
 
-        # Try to invite user to the group
-        target_group_id = int(vk_group.vk_group_id)
-        invited = await vk_invite_to_group(vk_user_id, target_group_id)
+        # Log access
+        log = AccessLog(
+            telegram_id=None,
+            email=payment.email,
+            order_id=payment.order_id,
+            group_name=vk_group.group_name,
+            group_id=vk_group.vk_group_id,
+            action="granted_vk",
+            timestamp=datetime.utcnow(),
+            comment=f"VK chat link sent to vk_id={vk_id_str}",
+        )
+        db.add(log)
+        db.commit()
 
-        if invited:
-            # Mark payment as used
-            payment.used = True
-
-            log = AccessLog(
-                telegram_id=None,
-                email=payment.email,
-                order_id=payment.order_id,
-                group_name=vk_group.group_name,
-                group_id=vk_group.vk_group_id,
-                action="granted_vk",
-                timestamp=datetime.utcnow(),
-                comment=f"VK invite sent to vk_id={vk_id_str}",
-            )
-            db.add(log)
-            db.commit()
-
-            await vk_send_message(
-                vk_user_id,
-                f"Оплата найдена ✅\n\n"
-                f"Группа: {vk_group.group_name}\n"
-                "Я отправил тебе приглашение в группу! "
-                "Проверь уведомления ВК 👆",
-                keyboard=main_keyboard(),
-            )
-        else:
-            # If invite failed, try sending the link
-            if vk_group.invite_link:
-                await vk_send_message(
-                    vk_user_id,
-                    f"Оплата найдена ✅\n\n"
-                    f"Группа: {vk_group.group_name}\n"
-                    f"Вступи в группу по ссылке: {vk_group.invite_link}",
-                    keyboard=main_keyboard(),
-                )
-            else:
-                await vk_send_message(
-                    vk_user_id,
-                    "Оплата найдена ✅\n"
-                    "Но не удалось отправить приглашение. "
-                    "Напиши в поддержку, и мы добавим тебя вручную.",
-                    keyboard=main_keyboard(),
-                )
+        await vk_send_message(
+            vk_user_id,
+            f"Оплата найдена ✅\n\n"
+            f"Чат марафона: {vk_group.group_name}\n"
+            f"Вступай по ссылке 👇\n{vk_group.invite_link}",
+            keyboard=main_keyboard(),
+        )
     finally:
         db.close()
 
