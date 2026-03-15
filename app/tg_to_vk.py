@@ -176,3 +176,61 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
         logger.info("Posted to VK wall: post_id=%s, topic=%s", post_id, topic_name)
     else:
         logger.error("Failed to post to VK wall: %s", result)
+
+
+# ---------------------------------------------------------------------------
+#  Admin forwards old messages to bot in DM → post to VK
+# ---------------------------------------------------------------------------
+
+
+@router.message(
+    F.chat.type == "private",
+    F.forward_date,  # message is forwarded
+)
+async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
+    """When admin forwards a message to the bot, publish it to VK wall."""
+    if not VK_TARGET_TOKEN or not VK_TARGET_GROUP_ID:
+        return
+
+    if not message.from_user or message.from_user.id not in ADMIN_IDS:
+        return
+
+    # Get text content
+    text = message.text or message.caption or ""
+
+    # Collect attachments
+    attachments = []
+
+    # Handle photos
+    if message.photo:
+        photo = message.photo[-1]
+        try:
+            file = await bot.get_file(photo.file_id)
+            photo_data = await bot.download_file(file.file_path)
+            photo_bytes = photo_data.read()
+            attachment = await _upload_photo_to_vk(photo_bytes)
+            if attachment:
+                attachments.append(attachment)
+        except Exception as e:
+            logger.error("Failed to download/upload forwarded photo: %s", e)
+
+    if not text and not attachments:
+        await message.reply("Не удалось извлечь контент из сообщения.")
+        return
+
+    params = {
+        "owner_id": -VK_TARGET_GROUP_ID,
+        "from_group": 1,
+        "message": text,
+    }
+    if attachments:
+        params["attachments"] = ",".join(attachments)
+
+    result = await _vk_api("wall.post", **params)
+    if "response" in result:
+        post_id = result["response"].get("post_id")
+        await message.reply(f"✅ Опубликовано на стене ВК (пост #{post_id})")
+    else:
+        error = result.get("error", {}).get("error_msg", "unknown")
+        await message.reply(f"❌ Ошибка публикации: {error}")
+
