@@ -305,7 +305,7 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
 
 @router.message(
     F.chat.type == "private",
-    F.forward_date,  # message is forwarded
+    F.forward_origin,  # message is forwarded
 )
 async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
     """When admin forwards a message to the bot, publish it to VK wall."""
