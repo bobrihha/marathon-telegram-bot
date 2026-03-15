@@ -306,6 +306,7 @@ async def handle_admin_reply(message: Message, state: FSMContext) -> None:
     StateFilter(None),
     F.chat.type == "private",
     F.text & ~F.text.startswith("/") & ~F.text.in_(ADMIN_MENU_BUTTONS),
+    ~F.forward_date,  # don't catch forwarded messages (handled by tg_to_vk)
 )
 async def handle_email_or_order(message: Message) -> None:
     if not message.from_user or not message.text:
