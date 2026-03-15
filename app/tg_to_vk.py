@@ -33,16 +33,16 @@ async def _vk_api(method: str, token: str | None = None, **params) -> dict:
 
 
 async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
-    """Upload a photo via bot community and return attachment string."""
-    # Use BOT community token for photo upload
+    """Upload a photo via bot community messages server and return attachment string."""
+    peer_id = ADMIN_IDS[0] if ADMIN_IDS else 0
     resp = await _vk_api(
-        "photos.getWallUploadServer",
+        "photos.getMessagesUploadServer",
         token=VK_COMMUNITY_TOKEN,
-        group_id=VK_GROUP_ID,
+        peer_id=peer_id,
     )
     upload_url = resp.get("response", {}).get("upload_url")
     if not upload_url:
-        logger.error("Failed to get VK upload URL: %s", resp)
+        logger.error("Failed to get VK photo upload URL: %s", resp)
         return None
 
     form = aiohttp.FormData()
@@ -56,9 +56,8 @@ async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
         return None
 
     save_resp = await _vk_api(
-        "photos.saveWallPhoto",
+        "photos.saveMessagesPhoto",
         token=VK_COMMUNITY_TOKEN,
-        group_id=VK_GROUP_ID,
         photo=upload_result["photo"],
         server=upload_result["server"],
         hash=upload_result["hash"],
@@ -75,12 +74,13 @@ async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
 async def _upload_doc_to_vk(
     doc_bytes: bytes, filename: str, title: str | None = None
 ) -> str | None:
-    """Upload a document/audio via bot community."""
-    # Use BOT community token — target token can't do docs
+    """Upload a document/audio via bot community messages server."""
+    peer_id = ADMIN_IDS[0] if ADMIN_IDS else 0
     resp = await _vk_api(
         "docs.getMessagesUploadServer",
         token=VK_COMMUNITY_TOKEN,
         type="doc",
+        peer_id=peer_id,
     )
     upload_url = resp.get("response", {}).get("upload_url")
     if not upload_url:
@@ -107,7 +107,6 @@ async def _upload_doc_to_vk(
         logger.error("VK doc save failed: %s", save_resp)
         return None
 
-    # VK returns different structure for docs
     doc_type = doc_info.get("type")
     doc_obj = doc_info.get(doc_type, doc_info.get("doc"))
     if doc_obj:
