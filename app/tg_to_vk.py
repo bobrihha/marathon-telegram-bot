@@ -236,32 +236,16 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
         except Exception as e:
             logger.error("Failed to download/upload photo: %s", e)
 
-    # Handle documents (PDF, etc.)
+    # Handle documents (PDF, etc.) — VK docs API unavailable with community tokens
     if message.document:
-        try:
-            file = await bot.get_file(message.document.file_id)
-            doc_data = await bot.download_file(file.file_path)
-            doc_bytes = doc_data.read()
-            fname = message.document.file_name or "document"
-            attachment = await _upload_doc_to_vk(doc_bytes, fname, fname)
-            if attachment:
-                attachments.append(attachment)
-        except Exception as e:
-            logger.error("Failed to download/upload document: %s", e)
+        fname = message.document.file_name or "документ"
+        text += f"\n\n📎 Файл: {fname}\n(см. оригинал в Telegram)"
 
-    # Handle audio / voice
+    # Handle audio / voice — VK docs API unavailable with community tokens
     audio_file = message.audio or message.voice
     if audio_file:
-        try:
-            file = await bot.get_file(audio_file.file_id)
-            audio_data = await bot.download_file(file.file_path)
-            audio_bytes = audio_data.read()
-            fname = getattr(audio_file, "file_name", None) or "audio.ogg"
-            attachment = await _upload_doc_to_vk(audio_bytes, fname, fname)
-            if attachment:
-                attachments.append(attachment)
-        except Exception as e:
-            logger.error("Failed to download/upload audio: %s", e)
+        fname = getattr(audio_file, "file_name", None) or "аудиозапись"
+        text += f"\n\n🎵 Аудио: {fname}\n(см. оригинал в Telegram)"
 
     # Handle video
     if message.video:
@@ -334,32 +318,16 @@ async def handle_media_to_vk(message: Message, bot: Bot) -> None:
         except Exception as e:
             logger.error("Failed to download/upload photo: %s", e)
 
-    # Handle documents (PDF, etc.)
+    # Handle documents (PDF, etc.) — VK docs API unavailable with community tokens
     if message.document:
-        try:
-            file = await bot.get_file(message.document.file_id)
-            doc_data = await bot.download_file(file.file_path)
-            doc_bytes = doc_data.read()
-            fname = message.document.file_name or "document"
-            attachment = await _upload_doc_to_vk(doc_bytes, fname, fname)
-            if attachment:
-                attachments.append(attachment)
-        except Exception as e:
-            logger.error("Failed to download/upload document: %s", e)
+        fname = message.document.file_name or "документ"
+        text += f"\n\n📎 Файл: {fname}\n(см. оригинал в Telegram)"
 
-    # Handle audio / voice
+    # Handle audio / voice — VK docs API unavailable with community tokens
     audio_file = message.audio or message.voice
     if audio_file:
-        try:
-            file = await bot.get_file(audio_file.file_id)
-            audio_data = await bot.download_file(file.file_path)
-            audio_bytes = audio_data.read()
-            fname = getattr(audio_file, "file_name", None) or "audio.ogg"
-            attachment = await _upload_doc_to_vk(audio_bytes, fname, fname)
-            if attachment:
-                attachments.append(attachment)
-        except Exception as e:
-            logger.error("Failed to download/upload audio: %s", e)
+        fname = getattr(audio_file, "file_name", None) or "аудиозапись"
+        text += f"\n\n🎵 Аудио: {fname}\n(см. оригинал в Telegram)"
 
     # Handle video
     if message.video:
