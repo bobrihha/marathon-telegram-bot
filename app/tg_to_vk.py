@@ -299,16 +299,17 @@ async def forward_to_vk(message: Message, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
-#  Admin forwards old messages to bot in DM → post to VK
+#  Admin sends/forwards messages to bot in DM → post to VK
 # ---------------------------------------------------------------------------
 
 
 @router.message(
     F.chat.type == "private",
-    F.forward_origin,  # message is forwarded
+    # Match: forwarded messages OR messages with media (audio, doc, photo, video)
+    F.forward_origin | F.audio | F.voice | F.document | F.photo | F.video,
 )
-async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
-    """When admin forwards a message to the bot, publish it to VK wall."""
+async def handle_media_to_vk(message: Message, bot: Bot) -> None:
+    """When admin sends or forwards a message with media to the bot, publish it to VK wall."""
     if not VK_TARGET_TOKEN or not VK_TARGET_GROUP_ID:
         return
 
@@ -332,7 +333,7 @@ async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
             if attachment:
                 attachments.append(attachment)
         except Exception as e:
-            logger.error("Failed to download/upload forwarded photo: %s", e)
+            logger.error("Failed to download/upload photo: %s", e)
 
     # Handle documents (PDF, etc.)
     if message.document:
@@ -345,7 +346,7 @@ async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
             if attachment:
                 attachments.append(attachment)
         except Exception as e:
-            logger.error("Failed to download/upload forwarded document: %s", e)
+            logger.error("Failed to download/upload document: %s", e)
 
     # Handle audio / voice
     audio_file = message.audio or message.voice
@@ -359,7 +360,7 @@ async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
             if attachment:
                 attachments.append(attachment)
         except Exception as e:
-            logger.error("Failed to download/upload forwarded audio: %s", e)
+            logger.error("Failed to download/upload audio: %s", e)
 
     # Handle video
     if message.video:
@@ -394,4 +395,5 @@ async def handle_forwarded_to_vk(message: Message, bot: Bot) -> None:
     else:
         error = result.get("error", {}).get("error_msg", "unknown")
         await message.reply(f"❌ Ошибка публикации: {error}")
+
 
