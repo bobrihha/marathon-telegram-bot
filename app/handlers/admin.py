@@ -13,12 +13,13 @@ from sqlalchemy.orm import Session
 
 from ..config import ADMIN_IDS
 from ..db.dal import SessionLocal
-from ..db.models import AccessLog, CurrentGroup, Payment, User
+from ..db.models import AccessLog, CurrentGroup, Payment, User, VkGroup
 
 router = Router()
 
 ADMIN_MENU = "Админ-меню"
 ADMIN_SET_GROUP = "Установить группу"
+ADMIN_SET_VK_GROUP = "Установить ВК-группу"
 ADMIN_EXPORT_LOGS = "Выгрузить логи"
 ADMIN_FIND_PAYMENT = "Найти оплату"
 ADMIN_REBIND_PAYMENT = "Перепривязать оплату"
@@ -29,6 +30,7 @@ ADMIN_CANCEL = "Отмена"
 ADMIN_MENU_BUTTONS = {
     ADMIN_MENU,
     ADMIN_SET_GROUP,
+    ADMIN_SET_VK_GROUP,
     ADMIN_EXPORT_LOGS,
     ADMIN_FIND_PAYMENT,
     ADMIN_REBIND_PAYMENT,
@@ -40,6 +42,7 @@ ADMIN_MENU_BUTTONS = {
 ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=ADMIN_SET_GROUP)],
+        [KeyboardButton(text=ADMIN_SET_VK_GROUP)],
         [KeyboardButton(text=ADMIN_FIND_PAYMENT)],
         [KeyboardButton(text=ADMIN_EXPORT_LOGS)],
         [KeyboardButton(text=ADMIN_REBIND_PAYMENT)],
@@ -68,6 +71,8 @@ class AdminStates(StatesGroup):
     rebind_telegram = State()
     remove_user = State()
     unban_user = State()
+    set_vk_group_id = State()
+    set_vk_group_name = State()
 
 
 def is_admin(message: Message) -> bool:
@@ -819,3 +824,84 @@ async def rebind_payment(message: Message) -> None:
         return
 
     await rebind_payment_to_user(message, payment_key, telegram_id)
+
+
+# ---------------------------------------------------------------------------
+#  VK group management
+# ---------------------------------------------------------------------------
+
+
+@router.message(F.text == ADMIN_SET_VK_GROUP)
+async def admin_set_vk_group_start(message: Message, state: FSMContext) -> None:
+    if not is_admin(message):
+        return
+    await state.set_state(AdminStates.set_vk_group_id)
+    await message.answer(
+        "Пришли ID ВК-группы (число, например 123456789).\n"
+        "Узнать можно в Управление → Адрес группы.",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
+@router.message(AdminStates.set_vk_group_id)
+async def admin_set_vk_group_id(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    text = message.text.strip()
+    if text == ADMIN_CANCEL:
+        await admin_cancel(message, state)
+        return
+
+    if not text.isdigit():
+        await message.answer("ID группы должен быть числом. Попробуй ещё раз.")
+        return
+
+    await state.update_data(vk_group_id=text)
+    await state.set_state(AdminStates.set_vk_group_name)
+    await message.answer(
+        "Теперь пришли название ВК-группы (например «МАРАФОН С 15 МАРТА»).",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
+@router.message(AdminStates.set_vk_group_name)
+async def admin_set_vk_group_name(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    group_name = message.text.strip()
+    if group_name == ADMIN_CANCEL:
+        await admin_cancel(message, state)
+        return
+
+    data = await state.get_data()
+    vk_group_id = data.get("vk_group_id")
+    if not vk_group_id:
+        await message.answer(
+            "Не вижу ID группы, начни заново.",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
+        await state.clear()
+        return
+
+    db: Session = SessionLocal()
+    try:
+        vk_group = VkGroup(
+            vk_group_id=vk_group_id,
+            group_name=group_name,
+            invite_link=f"https://vk.com/club{vk_group_id}",
+        )
+        db.add(vk_group)
+        db.commit()
+        await message.answer(
+            f"ВК-группа установлена:\n"
+            f"{group_name}\n"
+            f"ID: {vk_group_id}\n"
+            f"https://vk.com/club{vk_group_id}",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
+    finally:
+        db.close()
+        await state.clear()
+

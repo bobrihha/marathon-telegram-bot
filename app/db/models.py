@@ -33,6 +33,7 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     telegram_id = Column(String, unique=True, index=True)
+    vk_id = Column(String, unique=True, index=True, nullable=True)
     username = Column(String, nullable=True)
     full_name = Column(String, nullable=True)
 
@@ -63,3 +64,12 @@ class CurrentGroup(Base):
     chat_id = Column(String)
     group_name = Column(String)
     invite_link = Column(String)
+
+
+class VkGroup(Base):
+    __tablename__ = "vk_group"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    vk_group_id = Column(String, index=True)
+    group_name = Column(String)
+    invite_link = Column(String, nullable=True)

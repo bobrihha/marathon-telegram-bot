@@ -172,6 +172,13 @@ def create_app() -> web.Application:
     app.router.add_post("/webhooks/prodamus/{token}", handle_prodamus)
     app.router.add_post("/webhooks/tilda", handle_tilda)
     app.router.add_post("/webhooks/tilda/{token}", handle_tilda)
+
+    # VK Callback API
+    from .config import VK_COMMUNITY_TOKEN
+    if VK_COMMUNITY_TOKEN:
+        from .vk_bot import register_vk_routes
+        register_vk_routes(app)
+
     return app
 
 
