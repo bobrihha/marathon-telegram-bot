@@ -32,13 +32,24 @@ async def _vk_api(method: str, token: str | None = None, **params) -> dict:
             return result
 
 
+async def _get_vk_peer_id() -> int:
+    """Get a valid VK peer_id from bot community conversations."""
+    resp = await _vk_api(
+        "messages.getConversations",
+        token=VK_COMMUNITY_TOKEN,
+        count=1,
+    )
+    items = resp.get("response", {}).get("items", [])
+    if items:
+        return items[0]["conversation"]["peer"]["id"]
+    return 0
+
+
 async def _upload_photo_to_vk(photo_bytes: bytes) -> str | None:
     """Upload a photo via bot community messages server and return attachment string."""
-    peer_id = ADMIN_IDS[0] if ADMIN_IDS else 0
     resp = await _vk_api(
         "photos.getMessagesUploadServer",
         token=VK_COMMUNITY_TOKEN,
-        peer_id=peer_id,
     )
     upload_url = resp.get("response", {}).get("upload_url")
     if not upload_url:
@@ -75,7 +86,10 @@ async def _upload_doc_to_vk(
     doc_bytes: bytes, filename: str, title: str | None = None
 ) -> str | None:
     """Upload a document/audio via bot community messages server."""
-    peer_id = ADMIN_IDS[0] if ADMIN_IDS else 0
+    peer_id = await _get_vk_peer_id()
+    if not peer_id:
+        logger.error("No VK peer_id available for doc upload")
+        return None
     resp = await _vk_api(
         "docs.getMessagesUploadServer",
         token=VK_COMMUNITY_TOKEN,
