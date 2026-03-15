@@ -837,14 +837,14 @@ async def admin_set_vk_group_start(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(AdminStates.set_vk_group_id)
     await message.answer(
-        "Пришли ID ВК-группы (число, например 123456789).\n"
-        "Узнать можно в Управление → Адрес группы.",
+        "Пришли ссылку-приглашение на ВК-чат марафона\n"
+        "(например https://vk.me/join/...).",
         reply_markup=CANCEL_KEYBOARD,
     )
 
 
 @router.message(AdminStates.set_vk_group_id)
-async def admin_set_vk_group_id(message: Message, state: FSMContext) -> None:
+async def admin_set_vk_group_link(message: Message, state: FSMContext) -> None:
     if not is_admin(message) or not message.text:
         return
 
@@ -853,14 +853,16 @@ async def admin_set_vk_group_id(message: Message, state: FSMContext) -> None:
         await admin_cancel(message, state)
         return
 
-    if not text.isdigit():
-        await message.answer("ID группы должен быть числом. Попробуй ещё раз.")
+    if "vk.me/join" not in text and "vk.com" not in text:
+        await message.answer(
+            "Это не похоже на ссылку ВК. Пришли ссылку вида https://vk.me/join/..."
+        )
         return
 
-    await state.update_data(vk_group_id=text)
+    await state.update_data(vk_invite_link=text)
     await state.set_state(AdminStates.set_vk_group_name)
     await message.answer(
-        "Теперь пришли название ВК-группы (например «МАРАФОН С 15 МАРТА»).",
+        "Теперь пришли название ВК-чата (например «МАРАФОН С 15 АПРЕЛЯ»).",
         reply_markup=CANCEL_KEYBOARD,
     )
 
@@ -876,10 +878,10 @@ async def admin_set_vk_group_name(message: Message, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    vk_group_id = data.get("vk_group_id")
-    if not vk_group_id:
+    invite_link = data.get("vk_invite_link")
+    if not invite_link:
         await message.answer(
-            "Не вижу ID группы, начни заново.",
+            "Не вижу ссылку, начни заново.",
             reply_markup=ADMIN_MENU_KEYBOARD,
         )
         await state.clear()
@@ -888,20 +890,20 @@ async def admin_set_vk_group_name(message: Message, state: FSMContext) -> None:
     db: Session = SessionLocal()
     try:
         vk_group = VkGroup(
-            vk_group_id=vk_group_id,
+            vk_group_id="chat",
             group_name=group_name,
-            invite_link=f"https://vk.com/club{vk_group_id}",
+            invite_link=invite_link,
         )
         db.add(vk_group)
         db.commit()
         await message.answer(
-            f"ВК-группа установлена:\n"
-            f"{group_name}\n"
-            f"ID: {vk_group_id}\n"
-            f"https://vk.com/club{vk_group_id}",
+            f"ВК-чат установлен ✅\n"
+            f"Название: {group_name}\n"
+            f"Ссылка: {invite_link}",
             reply_markup=ADMIN_MENU_KEYBOARD,
         )
     finally:
         db.close()
         await state.clear()
+
 
