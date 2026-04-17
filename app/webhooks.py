@@ -119,10 +119,25 @@ async def handle_prodamus(request: web.Request) -> web.Response:
         ],
     )
     status_raw = _get_first(payload, ["status", "payment_status", "paymentStatus"])
-    product_name = _get_first(payload, ["product_name", "product", "title", "name"])
+    
+    # Improved product name extraction for Prodamus
+    product_name = _get_first(
+        payload,
+        ["product_name", "product", "title", "name", "customer_extra"]
+    )
+    if not product_name and "products" in payload and isinstance(payload["products"], list) and len(payload["products"]) > 0:
+        product_obj = payload["products"][0]
+        if isinstance(product_obj, dict):
+            product_name = product_obj.get("name") or product_obj.get("title")
+
     created_raw = _get_first(payload, ["created_at", "createdAt", "date", "created"])
 
     phone = _normalize_phone(phone_raw)
+
+    logging.info(
+        "Extracted payment data: order_id=%s, email=%s, phone=%s, product=%s",
+        order_id, email, phone, product_name
+    )
 
     if not order_id or (not email and not phone):
         return web.json_response(
