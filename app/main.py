@@ -448,7 +448,16 @@ async def main() -> None:
     init_db()
     runner = await start_webhook_server()
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(
+            bot,
+            allowed_updates=[
+                "message",
+                "callback_query",
+                "chat_join_request",
+                "my_chat_member",
+                "chat_member",
+            ],
+        )
     finally:
         await stop_webhook_server(runner)
 
