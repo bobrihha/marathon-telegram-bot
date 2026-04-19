@@ -64,6 +64,7 @@ class CurrentGroup(Base):
     chat_id = Column(String)
     group_name = Column(String)
     invite_link = Column(String)
+    product_tag = Column(String, nullable=True)
 
 
 class VkGroup(Base):
@@ -73,3 +74,4 @@ class VkGroup(Base):
     vk_group_id = Column(String, index=True)
     group_name = Column(String)
     invite_link = Column(String, nullable=True)
+    product_tag = Column(String, nullable=True)

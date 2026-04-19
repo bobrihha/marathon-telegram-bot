@@ -36,6 +36,7 @@ async def vk_api(method: str, **params) -> dict:
     async with aiohttp.ClientSession() as session:
         async with session.post(url, data=params) as resp:
             result = await resp.json()
+            logger.info("VK API response for %s: %s", method, result)
             if "error" in result:
                 logger.error("VK API error %s: %s", method, result["error"])
             return result
@@ -211,8 +212,21 @@ async def handle_payment_check(vk_user_id: int, text: str) -> None:
 
         db.commit()
 
-        # Try to get VK group/chat info
-        vk_group = db.query(VkGroup).order_by(VkGroup.id.desc()).first()
+        # Try to get VK group/chat info — match by product
+        product = (payment.product_name or "").lower()
+        vk_group = None
+        if product:
+            vk_group = db.query(VkGroup).filter(
+                VkGroup.product_tag == product
+            ).order_by(VkGroup.id.desc()).first()
+        # Fallback: untagged group
+        if not vk_group:
+            vk_group = db.query(VkGroup).filter(
+                VkGroup.product_tag.is_(None)
+            ).order_by(VkGroup.id.desc()).first()
+        # Last resort: any group
+        if not vk_group:
+            vk_group = db.query(VkGroup).order_by(VkGroup.id.desc()).first()
         if not vk_group or not vk_group.invite_link:
             await vk_send_message(
                 vk_user_id,
@@ -262,15 +276,17 @@ async def handle_vk_callback(request: web.Request) -> web.Response:
 
     event_type = data.get("type")
     group_id = data.get("group_id")
+    logger.info("VK callback received: event_type=%s, group_id=%s, data=%s", event_type, group_id, data)
 
-    # Validate secret
+    # Confirmation request — VK sends this WITHOUT secret, must check first
+    if event_type == "confirmation":
+        logger.info("Returning confirmation string: %s", VK_CONFIRMATION_STRING)
+        return web.Response(text=VK_CONFIRMATION_STRING)
+
+    # Validate secret (only for non-confirmation events)
     if VK_SECRET and data.get("secret") != VK_SECRET:
         logger.warning("VK callback: invalid secret")
         return web.Response(text="bad secret", status=403)
-
-    # Confirmation request
-    if event_type == "confirmation" and group_id == VK_GROUP_ID:
-        return web.Response(text=VK_CONFIRMATION_STRING)
 
     # New message
     if event_type == "message_new":
@@ -287,9 +303,11 @@ async def handle_vk_callback(request: web.Request) -> web.Response:
 
 async def _process_message(vk_user_id: int, text: str) -> None:
     """Route incoming VK messages."""
+    logger.info("Processing VK message from user %s: '%s'", vk_user_id, text)
     text_lower = text.lower()
 
     if text_lower in {"начать", "start", "привет", "здравствуйте"}:
+        logger.info("Sending greeting to VK user %s", vk_user_id)
         await vk_send_message(
             vk_user_id,
             "Привет! Я бот марафона 🏃‍♀️\n\n"

@@ -73,6 +73,8 @@ class AdminStates(StatesGroup):
     unban_user = State()
     set_vk_group_id = State()
     set_vk_group_name = State()
+    set_group_product = State()
+    set_vk_group_product = State()
 
 
 def is_admin(message: Message) -> bool:
@@ -280,6 +282,7 @@ async def create_current_group(
     message: Message,
     invite_link: str,
     group_name: str,
+    product_tag: str | None = None,
 ) -> None:
     db: Session = SessionLocal()
     try:
@@ -287,11 +290,13 @@ async def create_current_group(
             chat_id=None,
             group_name=group_name,
             invite_link=invite_link,
+            product_tag=product_tag,
         )
         db.add(current)
         db.commit()
+        tag_info = f"\nПродукт: {product_tag}" if product_tag else ""
         await message.answer(
-            f"Текущая группа установлена:\n{group_name}\n{invite_link}",
+            f"Текущая группа установлена:\n{group_name}\n{invite_link}{tag_info}",
             reply_markup=ADMIN_MENU_KEYBOARD,
         )
     finally:
@@ -375,14 +380,41 @@ async def admin_set_group_name(message: Message, state: FSMContext) -> None:
         await admin_cancel(message, state)
         return
 
+    await state.update_data(group_name=group_name)
+    await state.set_state(AdminStates.set_group_product)
+    await message.answer(
+        "Введи тег продукта для этой группы\n"
+        "(например: pechen, gormony, zhkt)\n\n"
+        "Этот тег должен совпадать с названием товара в Продамусе.\n"
+        "Если хочешь группу без привязки к продукту — напиши 'нет'.",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
+@router.message(AdminStates.set_group_product)
+async def admin_set_group_product(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    text = message.text.strip()
+    if text == ADMIN_CANCEL:
+        await admin_cancel(message, state)
+        return
+
+    product_tag = None if text.lower() in ("нет", "no", "-") else text.lower()
+
     data = await state.get_data()
     invite_link = data.get("invite_link")
-    if not invite_link:
-        await message.answer("Не вижу invite-link, начни заново.", reply_markup=ADMIN_MENU_KEYBOARD)
+    group_name = data.get("group_name")
+    if not invite_link or not group_name:
+        await message.answer(
+            "Не вижу данные, начни заново.",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
         await state.clear()
         return
 
-    await create_current_group(message, invite_link, group_name)
+    await create_current_group(message, invite_link, group_name, product_tag)
     await state.clear()
 
 
@@ -877,11 +909,35 @@ async def admin_set_vk_group_name(message: Message, state: FSMContext) -> None:
         await admin_cancel(message, state)
         return
 
+    await state.update_data(vk_group_name=group_name)
+    await state.set_state(AdminStates.set_vk_group_product)
+    await message.answer(
+        "Введи тег продукта для этой ВК-группы\n"
+        "(например: pechen, gormony, zhkt)\n\n"
+        "Этот тег должен совпадать с названием товара в Продамусе.\n"
+        "Если хочешь группу без привязки к продукту — напиши 'нет'.",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
+@router.message(AdminStates.set_vk_group_product)
+async def admin_set_vk_group_product(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    text = message.text.strip()
+    if text == ADMIN_CANCEL:
+        await admin_cancel(message, state)
+        return
+
+    product_tag = None if text.lower() in ("нет", "no", "-") else text.lower()
+
     data = await state.get_data()
     invite_link = data.get("vk_invite_link")
-    if not invite_link:
+    group_name = data.get("vk_group_name")
+    if not invite_link or not group_name:
         await message.answer(
-            "Не вижу ссылку, начни заново.",
+            "Не вижу данные, начни заново.",
             reply_markup=ADMIN_MENU_KEYBOARD,
         )
         await state.clear()
@@ -893,17 +949,18 @@ async def admin_set_vk_group_name(message: Message, state: FSMContext) -> None:
             vk_group_id="chat",
             group_name=group_name,
             invite_link=invite_link,
+            product_tag=product_tag,
         )
         db.add(vk_group)
         db.commit()
+        tag_info = f"\nПродукт: {product_tag}" if product_tag else ""
         await message.answer(
             f"ВК-чат установлен ✅\n"
             f"Название: {group_name}\n"
-            f"Ссылка: {invite_link}",
+            f"Ссылка: {invite_link}{tag_info}",
             reply_markup=ADMIN_MENU_KEYBOARD,
         )
     finally:
         db.close()
         await state.clear()
-
 

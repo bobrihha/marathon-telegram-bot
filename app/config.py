@@ -18,6 +18,7 @@ WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "")
 SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "")
 
+
 # VK Bot settings
 VK_COMMUNITY_TOKEN = os.getenv("VK_COMMUNITY_TOKEN", "")
 VK_GROUP_ID = int(os.getenv("VK_GROUP_ID", "0"))
@@ -27,3 +28,5 @@ VK_CONFIRMATION_STRING = os.getenv("VK_CONFIRMATION_STRING", "")
 # VK Target community (for TG→VK forwarding)
 VK_TARGET_TOKEN = os.getenv("VK_TARGET_TOKEN", "")
 VK_TARGET_GROUP_ID = int(os.getenv("VK_TARGET_GROUP_ID", "0"))
+VK_TARGET_MEDIA_TOKEN = os.getenv("VK_TARGET_MEDIA_TOKEN", "")
+VK_TARGET_VIDEO_TOKEN = os.getenv("VK_TARGET_VIDEO_TOKEN", "")

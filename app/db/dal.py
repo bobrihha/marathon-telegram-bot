@@ -23,3 +23,17 @@ def _run_migrations() -> None:
         if "vk_id" not in columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE users ADD COLUMN vk_id VARCHAR"))
+
+    # Add product_tag column to current_group if missing
+    if "current_group" in inspector.get_table_names():
+        columns = [col["name"] for col in inspector.get_columns("current_group")]
+        if "product_tag" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE current_group ADD COLUMN product_tag VARCHAR"))
+
+    # Add product_tag column to vk_group if missing
+    if "vk_group" in inspector.get_table_names():
+        columns = [col["name"] for col in inspector.get_columns("vk_group")]
+        if "product_tag" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE vk_group ADD COLUMN product_tag VARCHAR"))
