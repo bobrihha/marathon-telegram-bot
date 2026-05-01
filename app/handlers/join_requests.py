@@ -96,8 +96,10 @@ async def approve_join_request(event: ChatJoinRequest) -> None:
         )
         db.add(log)
         
-        # Mark payment as used ONLY when they actually join
-        payment.used = True
+        # NOTE: We do NOT mark payment.used = True here anymore.
+        # The user needs access to BOTH TG and VK groups with the same payment.
+        # The `used` flag is only checked to prevent OTHER users from reusing
+        # the same payment, which is handled by the User→Payment link check.
         
         db.commit()
         await event.approve()

@@ -16,7 +16,7 @@ from .config import (
     VK_SECRET,
 )
 from .db.dal import SessionLocal
-from .db.models import AccessLog, Payment, User, VkGroup
+from .db.models import AccessLog, CurrentGroup, Payment, User, VkGroup
 
 import aiohttp
 
@@ -163,13 +163,14 @@ async def handle_payment_check(vk_user_id: int, text: str) -> None:
             if used_payment:
                 existing_user = db.query(User).filter(User.payment_id == used_payment.id).first()
                 if existing_user and existing_user.vk_id == vk_id_str:
+                    # Same VK user — allow re-access
                     payment = used_payment
                 else:
                     await vk_send_message(
                         vk_user_id,
                         "Эта оплата уже использована другим пользователем.\n"
-                        "Если вы оплатили новый поток, укажите новый email/телефон "
-                        "или напишите в поддержку.",
+                        "Каждая оплата даёт доступ одному человеку.\n"
+                        "Если это ошибка — напиши в поддержку.",
                         keyboard=main_keyboard(),
                     )
                     return
@@ -210,6 +211,7 @@ async def handle_payment_check(vk_user_id: int, text: str) -> None:
         else:
             user.payment_id = payment.id
 
+        payment.used = True
         db.commit()
 
         # Try to get VK group/chat info — match by product
@@ -251,11 +253,29 @@ async def handle_payment_check(vk_user_id: int, text: str) -> None:
         db.add(log)
         db.commit()
 
+        # Also find matching TG group to send both links
+        tg_group = None
+        if product:
+            tg_group = db.query(CurrentGroup).filter(
+                CurrentGroup.product_tag == product
+            ).order_by(CurrentGroup.id.desc()).first()
+        if not tg_group:
+            tg_group = db.query(CurrentGroup).filter(
+                CurrentGroup.product_tag.is_(None)
+            ).order_by(CurrentGroup.id.desc()).first()
+        if not tg_group:
+            tg_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
+
+        tg_info = ""
+        if tg_group and tg_group.invite_link:
+            tg_info = f"\n\nТелеграм-группа: {tg_group.group_name}\nСсылка: {tg_group.invite_link}"
+
         await vk_send_message(
             vk_user_id,
             f"Оплата найдена ✅\n\n"
-            f"Чат марафона: {vk_group.group_name}\n"
-            f"Вступай по ссылке 👇\n{vk_group.invite_link}",
+            f"ВК-чат марафона: {vk_group.group_name}\n"
+            f"Вступай по ссылке 👇\n{vk_group.invite_link}"
+            f"{tg_info}",
             keyboard=main_keyboard(),
         )
     finally:

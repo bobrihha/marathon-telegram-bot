@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from .config import ADMIN_IDS, BOT_TOKEN, SUPPORT_CONTACT
 from .db.dal import SessionLocal, init_db
-from .db.models import CurrentGroup, Payment, User
+from .db.models import CurrentGroup, Payment, User, VkGroup
 from .handlers.admin import ADMIN_MENU, ADMIN_MENU_BUTTONS, ADMIN_MENU_KEYBOARD, router as admin_router
 from .handlers.join_requests import router as join_router
 from .webhooks import start_webhook_server, stop_webhook_server
@@ -365,16 +365,14 @@ async def handle_email_or_order(message: Message) -> None:
 
         if not payment:
             if used_payment:
-                # Check if this used payment BELONGS TO THE CURRENT USER
-                # If so, we should allow them to see the link again!
                 existing_user = db.query(User).filter(User.payment_id == used_payment.id).first()
                 if existing_user and existing_user.telegram_id == str(message.from_user.id):
-                    payment = used_payment  # Treat it as valid for this specific user
+                    payment = used_payment  # Same TG user — allow re-access
                 else:
                     await message.answer(
-                        "Эта оплата уже использована другим пользователем или для доступа.\n"
-                        "Если вы оплатили новый поток, пожалуйста, укажите "
-                        "новый email/телефон или напишите в поддержку."
+                        "Эта оплата уже использована другим пользователем.\n"
+                        "Каждая оплата даёт доступ одному человеку.\n"
+                        "Если это ошибка — напиши в поддержку."
                     )
                     return
 
@@ -387,9 +385,11 @@ async def handle_email_or_order(message: Message) -> None:
 
         existing_user = db.query(User).filter(User.payment_id == payment.id).first()
         if existing_user and existing_user.telegram_id != str(message.from_user.id):
+            # Payment is linked to a different user — block
             await message.answer(
-                "Эта оплата уже использована с другим Telegram-аккаунтом.\n"
-                "Если это ошибка, напиши, пожалуйста, в поддержку."
+                "Эта оплата уже использована другим пользователем.\n"
+                "Каждая оплата даёт доступ одному человеку.\n"
+                "Если это ошибка — напиши в поддержку."
             )
             return
 
@@ -405,9 +405,22 @@ async def handle_email_or_order(message: Message) -> None:
         else:
             user.payment_id = payment.id
 
-        # payment.used = True  <-- MOVED to join_requests.py (only when they actually join)
+        payment.used = True
 
-        current_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
+        # Find matching TG group
+        product = (payment.product_name or "").lower()
+        current_group = None
+        if product:
+            current_group = db.query(CurrentGroup).filter(
+                CurrentGroup.product_tag == product
+            ).order_by(CurrentGroup.id.desc()).first()
+        if not current_group:
+            current_group = db.query(CurrentGroup).filter(
+                CurrentGroup.product_tag.is_(None)
+            ).order_by(CurrentGroup.id.desc()).first()
+        if not current_group:
+            current_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
+
         if not current_group:
             await message.answer(
                 "Оплата подтверждена, но пока не настроена группа для выдачи доступа.\n"
@@ -416,24 +429,48 @@ async def handle_email_or_order(message: Message) -> None:
             db.commit()
             return
 
+        # Find matching VK group
+        vk_group = None
+        if product:
+            vk_group = db.query(VkGroup).filter(
+                VkGroup.product_tag == product
+            ).order_by(VkGroup.id.desc()).first()
+        if not vk_group:
+            vk_group = db.query(VkGroup).filter(
+                VkGroup.product_tag.is_(None)
+            ).order_by(VkGroup.id.desc()).first()
+        if not vk_group:
+            vk_group = db.query(VkGroup).order_by(VkGroup.id.desc()).first()
+
         db.commit()
 
-        join_url = current_group.invite_link
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
+        # Build keyboard with both links
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text="Вступить в Телеграм-группу 🔐",
+                    url=current_group.invite_link,
+                )
+            ]
+        ]
+        vk_info = ""
+        if vk_group and vk_group.invite_link:
+            buttons.append(
                 [
                     InlineKeyboardButton(
-                        text="Вступить в группу 🔐",
-                        url=join_url,
+                        text="Вступить в ВК-группу 🔐",
+                        url=vk_group.invite_link,
                     )
                 ]
-            ]
-        )
+            )
+            vk_info = f"\nВК-группа: {vk_group.group_name}"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
         await message.answer(
             "Оплата найдена ✅\n\n"
-            f"Группа: {current_group.group_name}\n"
-            "Нажми кнопку ниже и отправь заявку на вступление 👇",
+            f"Телеграм-группа: {current_group.group_name}{vk_info}\n"
+            "Нажми кнопки ниже и отправь заявки на вступление 👇",
             reply_markup=kb,
         )
     finally:
