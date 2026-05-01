@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import FSInputFile, KeyboardButton, Message, ReplyKeyboardMarkup
-from sqlalchemy import or_
+from sqlalchemy import Integer, func, or_
 from sqlalchemy.orm import Session
 
 from ..config import ADMIN_IDS
@@ -25,6 +25,7 @@ ADMIN_FIND_PAYMENT = "Найти оплату"
 ADMIN_REBIND_PAYMENT = "Перепривязать оплату"
 ADMIN_REMOVE_USER = "Удалить участника"
 ADMIN_UNBAN_USER = "Разбанить участника"
+ADMIN_STATS = "📊 Статистика"
 ADMIN_CANCEL = "Отмена"
 
 ADMIN_MENU_BUTTONS = {
@@ -36,11 +37,13 @@ ADMIN_MENU_BUTTONS = {
     ADMIN_REBIND_PAYMENT,
     ADMIN_REMOVE_USER,
     ADMIN_UNBAN_USER,
+    ADMIN_STATS,
     ADMIN_CANCEL,
 }
 
 ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
+        [KeyboardButton(text=ADMIN_STATS)],
         [KeyboardButton(text=ADMIN_SET_GROUP)],
         [KeyboardButton(text=ADMIN_SET_VK_GROUP)],
         [KeyboardButton(text=ADMIN_FIND_PAYMENT)],
@@ -339,6 +342,70 @@ async def admin_cancel(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await send_admin_menu(message)
+
+
+@router.message(F.text == ADMIN_STATS)
+async def admin_stats(message: Message) -> None:
+    if not is_admin(message):
+        return
+
+    db: Session = SessionLocal()
+    try:
+        # Total paid payments
+        total_paid = db.query(func.count(Payment.id)).filter(
+            Payment.status == "paid"
+        ).scalar() or 0
+
+        # Links issued (payment verified by user)
+        total_used = db.query(func.count(Payment.id)).filter(
+            Payment.status == "paid",
+            Payment.used.is_(True),
+        ).scalar() or 0
+
+        # Unused payments (paid but never verified)
+        total_unused = total_paid - total_used
+
+        # TG joins (from access_logs)
+        tg_joins = db.query(func.count(AccessLog.id)).filter(
+            AccessLog.action == "granted"
+        ).scalar() or 0
+
+        # VK links sent (from access_logs)
+        vk_joins = db.query(func.count(AccessLog.id)).filter(
+            AccessLog.action == "granted_vk"
+        ).scalar() or 0
+
+        # Breakdown by product
+        product_stats = (
+            db.query(
+                Payment.product_name,
+                func.count(Payment.id),
+                func.sum(func.cast(Payment.used, Integer)),
+            )
+            .filter(Payment.status == "paid")
+            .group_by(Payment.product_name)
+            .all()
+        )
+
+        lines = [
+            "📊 Статистика бота\n",
+            f"💰 Всего оплат: {total_paid}",
+            f"🔗 Ссылки выданы: {total_used}",
+            f"⏳ Не забрали ссылку: {total_unused}",
+            f"✅ Вступили в ТГ-группу: {tg_joins}",
+            f"✅ Получили ВК-ссылку: {vk_joins}",
+        ]
+
+        if product_stats:
+            lines.append("\n📦 По продуктам:")
+            for product_name, count, used_count in product_stats:
+                name = product_name or "(без тега)"
+                used_count = used_count or 0
+                lines.append(f"  • {name}: {count} оплат, {used_count} выдано")
+
+        await message.answer("\n".join(lines), reply_markup=ADMIN_MENU_KEYBOARD)
+    finally:
+        db.close()
 
 
 @router.message(F.text == ADMIN_SET_GROUP)
