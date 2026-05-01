@@ -318,6 +318,13 @@ async def handle_vk_callback(request: web.Request) -> web.Response:
         if vk_user_id and text:
             await _process_message(vk_user_id, text)
 
+    # Someone joined the VK group — check if they are approved
+    elif event_type == "group_join":
+        obj = data.get("object", {})
+        vk_user_id = obj.get("user_id")
+        if vk_user_id:
+            await _check_group_join(vk_user_id)
+
     return web.Response(text="ok")
 
 
@@ -367,6 +374,83 @@ async def _handle_support(vk_user_id: int) -> None:
         "Или напиши напрямую администратору марафона.",
         keyboard=main_keyboard(),
     )
+
+
+async def _check_group_join(vk_user_id: int) -> None:
+    """Check if a new VK group member has a valid payment. Alert admins if not."""
+    db: Session = SessionLocal()
+    try:
+        vk_id_str = str(vk_user_id)
+        user = db.query(User).filter(User.vk_id == vk_id_str).first()
+
+        if user and user.payment_id:
+            payment = user.payment
+            if payment and payment.status == "paid":
+                logger.info("VK group_join: user %s is approved (order %s)", vk_id_str, payment.order_id)
+                return
+
+        # Stranger! Get their info and alert admins
+        result = await vk_api("users.get", user_ids=vk_user_id)
+        users_data = result.get("response", [])
+        if users_data:
+            info = users_data[0]
+            name = f"{info.get('first_name', '')} {info.get('last_name', '')}"
+            user_label = f"{name}\nvk.com/id{vk_user_id}"
+        else:
+            user_label = f"VK ID {vk_user_id}"
+
+        logger.warning("VK group_join: STRANGER detected — %s", user_label)
+
+        # Notify TG admins
+        await _notify_tg_admins(
+            f"⚠️ Чужак вступил в ВК-группу!\n\n"
+            f"{user_label}\n\n"
+            f"Этот пользователь НЕ проверял оплату через бота.\n"
+            f"Возможно, кто-то поделился ссылкой."
+        )
+    except Exception as e:
+        logger.exception("Error checking group_join: %s", e)
+    finally:
+        db.close()
+
+
+async def _notify_tg_admins(text: str) -> None:
+    """Send a notification to all TG admins via the Telegram bot."""
+    if not ADMIN_IDS:
+        return
+    try:
+        from .main import bot as tg_bot
+        for admin_id in ADMIN_IDS:
+            try:
+                await tg_bot.send_message(admin_id, text)
+            except Exception as e:
+                logger.error("Failed to notify TG admin %s: %s", admin_id, e)
+    except Exception as e:
+        logger.error("Failed to import TG bot for admin notification: %s", e)
+
+
+def get_approved_vk_ids() -> list[dict]:
+    """Get list of approved VK users (who got links) for admin audit."""
+    db: Session = SessionLocal()
+    try:
+        users = (
+            db.query(User)
+            .filter(User.vk_id.isnot(None))
+            .all()
+        )
+        result = []
+        for user in users:
+            payment = user.payment
+            result.append({
+                "vk_id": user.vk_id,
+                "telegram_id": user.telegram_id,
+                "email": payment.email if payment else None,
+                "phone": payment.phone if payment else None,
+                "order_id": payment.order_id if payment else None,
+            })
+        return result
+    finally:
+        db.close()
 
 
 def register_vk_routes(app: web.Application) -> None:

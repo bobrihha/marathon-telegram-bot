@@ -26,6 +26,7 @@ ADMIN_REBIND_PAYMENT = "Перепривязать оплату"
 ADMIN_REMOVE_USER = "Удалить участника"
 ADMIN_UNBAN_USER = "Разбанить участника"
 ADMIN_STATS = "📊 Статистика"
+ADMIN_VK_AUDIT = "🔍 Аудит ВК"
 ADMIN_CANCEL = "Отмена"
 
 ADMIN_MENU_BUTTONS = {
@@ -38,12 +39,13 @@ ADMIN_MENU_BUTTONS = {
     ADMIN_REMOVE_USER,
     ADMIN_UNBAN_USER,
     ADMIN_STATS,
+    ADMIN_VK_AUDIT,
     ADMIN_CANCEL,
 }
 
 ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=ADMIN_STATS)],
+        [KeyboardButton(text=ADMIN_STATS), KeyboardButton(text=ADMIN_VK_AUDIT)],
         [KeyboardButton(text=ADMIN_SET_GROUP)],
         [KeyboardButton(text=ADMIN_SET_VK_GROUP)],
         [KeyboardButton(text=ADMIN_FIND_PAYMENT)],
@@ -406,6 +408,44 @@ async def admin_stats(message: Message) -> None:
         await message.answer("\n".join(lines), reply_markup=ADMIN_MENU_KEYBOARD)
     finally:
         db.close()
+
+@router.message(F.text == ADMIN_VK_AUDIT)
+async def admin_vk_audit(message: Message) -> None:
+    if not is_admin(message):
+        return
+
+    from ..vk_bot import get_approved_vk_ids
+
+    approved = get_approved_vk_ids()
+    if not approved:
+        await message.answer(
+            "🔍 Аудит ВК\n\nНет одобренных ВК-пользователей в базе.",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
+        return
+
+    lines = [
+        f"🔍 Аудит ВК — одобренные пользователи ({len(approved)}):\n",
+    ]
+    for i, u in enumerate(approved, 1):
+        vk_link = f"vk.com/id{u['vk_id']}"
+        email = u.get("email") or "-"
+        phone = u.get("phone") or "-"
+        tg = f"TG: {u['telegram_id']}" if u.get("telegram_id") else "TG: нет"
+        lines.append(f"{i}. {vk_link} | {email} | {phone} | {tg}")
+
+    lines.append(
+        "\n💡 Сравните этот список с участниками ВК-группы.\n"
+        "Кого нет в этом списке — тот чужак."
+    )
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        for chunk_start in range(0, len(text), 4000):
+            chunk = text[chunk_start:chunk_start + 4000]
+            await message.answer(chunk, reply_markup=ADMIN_MENU_KEYBOARD)
+    else:
+        await message.answer(text, reply_markup=ADMIN_MENU_KEYBOARD)
 
 
 @router.message(F.text == ADMIN_SET_GROUP)
