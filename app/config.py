@@ -16,6 +16,10 @@ ADMIN_IDS = list(
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "")
+VK_CALLBACK_URL = os.getenv(
+    "VK_CALLBACK_URL",
+    "https://bot.bosforovna-klub.ru/webhooks/vk",
+)
 SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "")
 
 

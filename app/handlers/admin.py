@@ -80,6 +80,7 @@ class AdminStates(StatesGroup):
     set_vk_group_name = State()
     set_group_product = State()
     set_vk_group_product = State()
+    set_vk_group_token = State()
 
 
 def is_admin(message: Message) -> bool:
@@ -326,7 +327,8 @@ async def admin_help(message: Message) -> None:
         "/find_payment <email, телефон или order_id> — найти оплату и связки\n"
         "/export_logs <YYYY-MM-DD> <YYYY-MM-DD> [название группы] — CSV выгрузка\n"
         "/rebind_payment <email|телефон|order_id> <telegram_id> — перепривязать оплату\n"
-        "В меню есть кнопка «Удалить участника»"
+        "В меню есть кнопка «Удалить участника»\n"
+        "«Установить ВК-группу» — добавить ссылку, тег продукта и токен сообщества"
     )
 
 
@@ -976,7 +978,7 @@ async def admin_set_vk_group_start(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(AdminStates.set_vk_group_id)
     await message.answer(
-        "Пришли ссылку-приглашение на ВК-чат марафона\n"
+        "Пришли ссылку-приглашение на ВК-сообщество или чат марафона\n"
         "(например https://vk.me/join/...).",
         reply_markup=CANCEL_KEYBOARD,
     )
@@ -992,9 +994,9 @@ async def admin_set_vk_group_link(message: Message, state: FSMContext) -> None:
         await admin_cancel(message, state)
         return
 
-    if "vk.me/join" not in text and "vk.com" not in text:
+    if not any(domain in text for domain in ("vk.ru", "vk.com", "vk.me")):
         await message.answer(
-            "Это не похоже на ссылку ВК. Пришли ссылку вида https://vk.me/join/..."
+            "Это не похоже на ссылку ВК. Пришли ссылку на сообщество или приглашение ВК."
         )
         return
 
@@ -1038,10 +1040,32 @@ async def admin_set_vk_group_product(message: Message, state: FSMContext) -> Non
         return
 
     product_tag = None if text.lower() in ("нет", "no", "-") else text.lower()
+    await state.update_data(vk_product_tag=product_tag)
+    await state.set_state(AdminStates.set_vk_group_token)
+    await message.answer(
+        "Теперь пришли ключ доступа сообщества ВК.\n\n"
+        "Он нужен, чтобы бот мог сам подключить Callback API и проверять заявки.\n"
+        "Если сейчас нужно только сохранить ссылку без автосторожа — напиши 'нет'.",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
+@router.message(AdminStates.set_vk_group_token)
+async def admin_set_vk_group_token(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    text = message.text.strip()
+    if text == ADMIN_CANCEL:
+        await admin_cancel(message, state)
+        return
+
+    access_token = None if text.lower() in ("нет", "no", "-") else text
 
     data = await state.get_data()
     invite_link = data.get("vk_invite_link")
     group_name = data.get("vk_group_name")
+    product_tag = data.get("vk_product_tag")
     if not invite_link or not group_name:
         await message.answer(
             "Не вижу данные, начни заново.",
@@ -1050,24 +1074,58 @@ async def admin_set_vk_group_product(message: Message, state: FSMContext) -> Non
         await state.clear()
         return
 
+    vk_group_id = "chat"
+    callback_data = None
+    callback_error = None
+
+    if access_token:
+        from ..vk_bot import configure_vk_callback_server, get_vk_group_info
+
+        info = await get_vk_group_info(access_token)
+        if info and info.get("id"):
+            vk_group_id = str(info["id"])
+        else:
+            callback_error = "не смог определить ID сообщества по токену"
+
+        if vk_group_id != "chat":
+            try:
+                callback_data = await configure_vk_callback_server(
+                    access_token=access_token,
+                    group_id=vk_group_id,
+                    title="MarathonBot",
+                )
+            except Exception as e:
+                callback_error = str(e)
+
     db: Session = SessionLocal()
     try:
         vk_group = VkGroup(
-            vk_group_id="chat",
+            vk_group_id=vk_group_id,
             group_name=group_name,
             invite_link=invite_link,
             product_tag=product_tag,
+            access_token=access_token,
         )
+        if callback_data:
+            vk_group.callback_secret = callback_data["secret"]
+            vk_group.callback_confirmation = callback_data["confirmation"]
+            vk_group.callback_server_id = callback_data["server_id"]
+            vk_group.callback_url = callback_data["url"]
+            vk_group.callback_configured_at = datetime.utcnow()
         db.add(vk_group)
         db.commit()
         tag_info = f"\nПродукт: {product_tag}" if product_tag else ""
+        callback_info = "\nCallback API: подключен ✅" if callback_data else "\nCallback API: не подключен"
+        if callback_error:
+            callback_info += f"\nПричина: {callback_error}"
         await message.answer(
             f"ВК-чат установлен ✅\n"
             f"Название: {group_name}\n"
-            f"Ссылка: {invite_link}{tag_info}",
+            f"ID сообщества: {vk_group_id}\n"
+            f"Ссылка: {invite_link}{tag_info}"
+            f"{callback_info}",
             reply_markup=ADMIN_MENU_KEYBOARD,
         )
     finally:
         db.close()
         await state.clear()
-

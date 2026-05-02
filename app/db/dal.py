@@ -34,6 +34,18 @@ def _run_migrations() -> None:
     # Add product_tag column to vk_group if missing
     if "vk_group" in inspector.get_table_names():
         columns = [col["name"] for col in inspector.get_columns("vk_group")]
-        if "product_tag" not in columns:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE vk_group ADD COLUMN product_tag VARCHAR"))
+        new_columns = {
+            "product_tag": "VARCHAR",
+            "access_token": "TEXT",
+            "callback_secret": "VARCHAR",
+            "callback_confirmation": "VARCHAR",
+            "callback_server_id": "VARCHAR",
+            "callback_url": "VARCHAR",
+            "callback_configured_at": "DATETIME",
+        }
+        with engine.begin() as conn:
+            for column_name, column_type in new_columns.items():
+                if column_name not in columns:
+                    conn.execute(
+                        text(f"ALTER TABLE vk_group ADD COLUMN {column_name} {column_type}")
+                    )
