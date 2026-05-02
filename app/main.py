@@ -376,12 +376,13 @@ async def handle_email_or_order(message: Message) -> None:
                     )
                     return
 
-            await message.answer(
-                "Я не нашёл оплаченный заказ по этим данным.\n"
-                "Проверь, пожалуйста, правильно ли ты ввёл номер телефона, "
-                "или напиши в поддержку."
-            )
-            return
+            if not payment:
+                await message.answer(
+                    "Я не нашёл оплаченный заказ по этим данным.\n"
+                    "Проверь, пожалуйста, правильно ли ты ввёл номер телефона, "
+                    "или напиши в поддержку."
+                )
+                return
 
         existing_user = db.query(User).filter(User.payment_id == payment.id).first()
         if existing_user and existing_user.telegram_id != str(message.from_user.id):
@@ -395,15 +396,31 @@ async def handle_email_or_order(message: Message) -> None:
 
         user = db.query(User).filter(User.telegram_id == str(message.from_user.id)).first()
         if not user:
-            user = User(
-                telegram_id=str(message.from_user.id),
-                username=message.from_user.username,
-                full_name=message.from_user.full_name,
-                payment_id=payment.id,
-            )
-            db.add(user)
+            if existing_user and not existing_user.telegram_id:
+                user = existing_user
+                user.telegram_id = str(message.from_user.id)
+                user.username = message.from_user.username
+                user.full_name = message.from_user.full_name
+                user.payment_id = payment.id
+            else:
+                user = User(
+                    telegram_id=str(message.from_user.id),
+                    username=message.from_user.username,
+                    full_name=message.from_user.full_name,
+                    payment_id=payment.id,
+                )
+                db.add(user)
         else:
+            if existing_user and existing_user.id != user.id and not existing_user.telegram_id:
+                if existing_user.vk_id and not user.vk_id:
+                    existing_vk_id = existing_user.vk_id
+                    existing_user.vk_id = None
+                    db.flush()
+                    user.vk_id = existing_vk_id
+                existing_user.payment_id = None
             user.payment_id = payment.id
+            user.username = message.from_user.username
+            user.full_name = message.from_user.full_name
 
         payment.used = True
 
@@ -454,23 +471,36 @@ async def handle_email_or_order(message: Message) -> None:
             ]
         ]
         vk_info = ""
+        vk_requires_bot_check = False
         if vk_group and vk_group.invite_link:
+            vk_button_url = vk_group.invite_link
+            vk_button_text = "Вступить в ВК-группу 🔐"
+            if vk_group.access_token and vk_group.vk_group_id and vk_group.vk_group_id != "chat":
+                vk_button_url = f"https://vk.com/im?sel=-{str(vk_group.vk_group_id).lstrip('-')}"
+                vk_button_text = "Открыть ВК-бота 🔐"
+                vk_requires_bot_check = True
             buttons.append(
                 [
                     InlineKeyboardButton(
-                        text="Вступить в ВК-группу 🔐",
-                        url=vk_group.invite_link,
+                        text=vk_button_text,
+                        url=vk_button_url,
                     )
                 ]
             )
             vk_info = f"\nВК-группа: {vk_group.group_name}"
 
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        next_step = "Нажми кнопки ниже и отправь заявки на вступление."
+        if vk_requires_bot_check:
+            next_step = (
+                "Нажми кнопки ниже. Для ВК сначала открой сообщения сообщества "
+                "и отправь туда тот же телефон или email, чтобы бот привязал твой VK-аккаунт."
+            )
 
         await message.answer(
             "Оплата найдена ✅\n\n"
             f"Телеграм-группа: {current_group.group_name}{vk_info}\n"
-            "Нажми кнопки ниже и отправь заявки на вступление 👇",
+            f"{next_step}",
             reply_markup=kb,
         )
     finally:
