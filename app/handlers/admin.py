@@ -84,6 +84,7 @@ class AdminStates(StatesGroup):
     set_group_product = State()
     set_vk_group_product = State()
     set_vk_group_token = State()
+    set_vk_admin_token = State()
 
 
 def is_admin(message: Message) -> bool:
@@ -454,11 +455,9 @@ async def admin_vk_audit(message: Message) -> None:
 
 
 @router.message(F.text == ADMIN_VK_AUTH)
-async def admin_vk_auth(message: Message) -> None:
+async def admin_vk_auth(message: Message, state: FSMContext) -> None:
     if not is_admin(message):
         return
-
-    from ..vk_bot import vk_oauth_url
 
     # Check current auth status
     db: Session = SessionLocal()
@@ -474,21 +473,87 @@ async def admin_vk_auth(message: Message) -> None:
     finally:
         db.close()
 
-    url = vk_oauth_url()
-    if not url:
+    token_url = (
+        "https://oauth.vk.com/authorize?client_id=6121396"
+        "&display=page&redirect_uri=https://oauth.vk.com/blank.html"
+        "&scope=groups&response_type=token&v=5.199"
+    )
+
+    await state.set_state(AdminStates.set_vk_admin_token)
+    await message.answer(
+        f"🔑 Авторизация ВК\n\n{status}"
+        "Чтобы бот мог одобрять заявки в сообществах, "
+        "нужен пользовательский токен ВК.\n\n"
+        "📋 Инструкция:\n"
+        f"1. Перейдите по ссылке:\n{token_url}\n\n"
+        "2. Нажмите «Разрешить»\n"
+        "3. Скопируйте из адресной строки всё "
+        "между access_token= и &expires\n"
+        "4. Отправьте этот токен сюда\n\n"
+        "Или напишите 'Отмена' для выхода.",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
+@router.message(AdminStates.set_vk_admin_token)
+async def admin_set_vk_admin_token(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    text = message.text.strip()
+    if text == ADMIN_CANCEL:
+        await admin_cancel(message, state)
+        return
+
+    # Accept full URL or just the token
+    token = text
+    if "access_token=" in token:
+        # Extract token from URL
+        import re
+        match = re.search(r'access_token=([^&]+)', token)
+        if match:
+            token = match.group(1)
+
+    if len(token) < 20:
         await message.answer(
-            f"{status}"
-            "Для настройки нужно добавить VK_APP_ID и VK_APP_SECRET в .env.\n"
-            "Обратитесь к разработчику.",
-            reply_markup=ADMIN_MENU_KEYBOARD,
+            "Это не похоже на токен ВК. Попробуйте ещё раз.",
+            reply_markup=CANCEL_KEYBOARD,
         )
         return
 
+    # Verify the token works
+    from ..vk_bot import vk_api
+    result = await vk_api("users.get", access_token=token)
+    users = result.get("response", [])
+    if not users:
+        error = result.get("error", {}).get("error_msg", "неизвестная ошибка")
+        await message.answer(
+            f"❌ Токен не работает: {error}\nПопробуйте получить новый.",
+            reply_markup=CANCEL_KEYBOARD,
+        )
+        return
+
+    vk_user = users[0]
+    vk_user_id = str(vk_user.get("id", ""))
+    vk_name = f"{vk_user.get('first_name', '')} {vk_user.get('last_name', '')}"
+
+    db: Session = SessionLocal()
+    try:
+        auth = VkAdminAuth(
+            vk_user_id=vk_user_id,
+            access_token=token,
+            created_at=datetime.utcnow(),
+        )
+        db.add(auth)
+        db.commit()
+    finally:
+        db.close()
+
+    await state.clear()
     await message.answer(
-        f"🔑 Авторизация ВК\n\n{status}"
-        "Перейдите по ссылке ниже и нажмите «Разрешить».\n"
-        "После этого бот сможет автоматически одобрять/отклонять "
-        f"заявки в ВК-сообществах.\n\n{url}",
+        f"✅ Авторизация ВК сохранена!\n\n"
+        f"Пользователь: {vk_name} (id{vk_user_id})\n"
+        f"Теперь заявки в ВК-сообщества будут одобряться автоматически.",
         reply_markup=ADMIN_MENU_KEYBOARD,
     )
 
