@@ -976,16 +976,14 @@ async def _check_group_join(
             user_label = f"VK ID {vk_user_id}"
 
         logger.warning("VK group_join: STRANGER detected — %s", user_label)
-        removed = await _remove_vk_user(vk_user_id, source_group, callback_group_id)
-        action = "Удалён из ВК-группы." if removed else "Проверь вручную: удалить через API не удалось."
 
-        # Notify TG admins
+        # Notify TG admins (don't auto-remove — admin may have added them manually)
         await _notify_tg_admins(
-            f"⚠️ Чужак вступил в ВК-группу!\n\n"
+            f"ℹ️ Новый участник в ВК-группе без оплаты через бота\n\n"
             f"{user_label}\n\n"
             f"Этот пользователь НЕ проверял оплату через бота.\n"
-            f"Возможно, кто-то поделился ссылкой.\n\n"
-            f"{action}"
+            f"Если вы добавили его вручную — всё ок.\n"
+            f"Если нет — удалите его из группы."
         )
     except Exception as e:
         logger.exception("Error checking group_join: %s", e)
