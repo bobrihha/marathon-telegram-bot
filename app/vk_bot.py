@@ -653,35 +653,40 @@ def _get_vk_admin_token() -> str | None:
 
 
 def vk_oauth_url() -> str | None:
-    """Generate VK OAuth authorization URL."""
+    """Generate VK ID OAuth authorization URL."""
     if not VK_APP_ID:
         return None
     redirect_uri = VK_CALLBACK_URL.replace("/webhooks/vk", "/vk-auth/callback")
     return (
-        f"https://oauth.vk.com/authorize?client_id={VK_APP_ID}"
-        f"&display=page&redirect_uri={redirect_uri}"
-        f"&scope=groups&response_type=code&v=5.199"
+        f"https://id.vk.com/authorize?client_id={VK_APP_ID}"
+        f"&redirect_uri={redirect_uri}"
+        f"&response_type=code&scope=groups"
+        f"&state=marathon_bot"
     )
 
 
 async def handle_vk_oauth_callback(request: web.Request) -> web.Response:
-    """Handle VK OAuth redirect — exchange code for user token."""
+    """Handle VK ID OAuth redirect — exchange code for user token."""
     code = request.query.get("code")
     if not code:
+        error = request.query.get("error_description", request.query.get("error", ""))
         return web.Response(
-            text="<h2>Ошибка: код авторизации не получен</h2>",
+            text=f"<h2>Ошибка авторизации</h2><p>{error or 'код не получен'}</p>",
             content_type="text/html",
         )
 
     redirect_uri = VK_CALLBACK_URL.replace("/webhooks/vk", "/vk-auth/callback")
+    # VK ID uses POST to /oauth2/auth for token exchange
     async with aiohttp.ClientSession() as session:
-        async with session.get(
-            "https://oauth.vk.com/access_token",
-            params={
+        async with session.post(
+            "https://id.vk.com/oauth2/auth",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
                 "client_id": VK_APP_ID,
                 "client_secret": VK_APP_SECRET,
                 "redirect_uri": redirect_uri,
-                "code": code,
+                "device_id": "marathon_bot",
             },
         ) as resp:
             data = await resp.json(content_type=None)
