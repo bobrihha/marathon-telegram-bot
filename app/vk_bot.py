@@ -653,30 +653,71 @@ def _get_vk_admin_token() -> str | None:
 
 
 def vk_oauth_url() -> str | None:
-    """Generate VK ID OAuth authorization URL."""
+    """Generate VK ID OAuth authorization URL (implicit flow)."""
     if not VK_APP_ID:
         return None
     redirect_uri = VK_CALLBACK_URL.replace("/webhooks/vk", "/vk-auth/callback")
     return (
         f"https://id.vk.com/authorize?client_id={VK_APP_ID}"
         f"&redirect_uri={redirect_uri}"
-        f"&response_type=code&scope=groups"
+        f"&response_type=token&scope=groups"
         f"&state=marathon_bot"
     )
 
 
 async def handle_vk_oauth_callback(request: web.Request) -> web.Response:
-    """Handle VK ID OAuth redirect — exchange code for user token."""
+    """Serve HTML page that extracts token from URL fragment and saves it."""
+    # If called with code param — try authorization code flow
     code = request.query.get("code")
-    if not code:
-        error = request.query.get("error_description", request.query.get("error", ""))
-        return web.Response(
-            text=f"<h2>Ошибка авторизации</h2><p>{error or 'код не получен'}</p>",
-            content_type="text/html",
-        )
+    if code:
+        return await _handle_code_flow(request, code)
 
+    # Otherwise serve HTML for implicit flow (token in fragment)
+    return web.Response(
+        text=_OAUTH_CAPTURE_HTML,
+        content_type="text/html",
+    )
+
+
+async def handle_vk_oauth_save(request: web.Request) -> web.Response:
+    """Save VK admin token received from the capture page."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad request"}, status=400)
+
+    token = data.get("access_token", "")
+    vk_user_id = str(data.get("user_id", ""))
+
+    if not token or len(token) < 20:
+        return web.json_response({"ok": False, "error": "invalid token"}, status=400)
+
+    db: Session = SessionLocal()
+    try:
+        auth = VkAdminAuth(
+            vk_user_id=vk_user_id,
+            access_token=token,
+            created_at=datetime.utcnow(),
+        )
+        db.add(auth)
+        db.commit()
+    finally:
+        db.close()
+
+    logger.info("VK admin OAuth completed for user %s", vk_user_id)
+
+    await _notify_tg_admins(
+        f"✅ ВК-авторизация администратора получена!\n"
+        f"VK user_id: {vk_user_id}\n"
+        f"Теперь заявки в ВК-сообщества будут одобряться автоматически."
+    )
+
+    return web.json_response({"ok": True})
+
+
+async def _handle_code_flow(request: web.Request, code: str) -> web.Response:
+    """Handle authorization code flow as fallback."""
     redirect_uri = VK_CALLBACK_URL.replace("/webhooks/vk", "/vk-auth/callback")
-    # VK ID uses POST to /oauth2/auth for token exchange
     async with aiohttp.ClientSession() as session:
         async with session.post(
             "https://id.vk.com/oauth2/auth",
@@ -693,7 +734,7 @@ async def handle_vk_oauth_callback(request: web.Request) -> web.Response:
 
     if "access_token" not in data:
         error = data.get("error_description", data.get("error", "unknown"))
-        logger.error("VK OAuth error: %s", data)
+        logger.error("VK OAuth code flow error: %s", data)
         return web.Response(
             text=f"<h2>Ошибка авторизации ВК</h2><p>{error}</p>",
             content_type="text/html",
@@ -714,9 +755,8 @@ async def handle_vk_oauth_callback(request: web.Request) -> web.Response:
     finally:
         db.close()
 
-    logger.info("VK admin OAuth completed for user %s", vk_user_id)
+    logger.info("VK admin OAuth (code flow) completed for user %s", vk_user_id)
 
-    # Notify TG admins
     await _notify_tg_admins(
         f"✅ ВК-авторизация администратора получена!\n"
         f"VK user_id: {vk_user_id}\n"
@@ -733,6 +773,55 @@ async def handle_vk_oauth_callback(request: web.Request) -> web.Response:
         ),
         content_type="text/html",
     )
+
+
+_OAUTH_CAPTURE_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Авторизация ВК</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:60px">
+<div id="status"><h2>⏳ Сохраняю авторизацию...</h2></div>
+<script>
+(function() {
+    var hash = window.location.hash.substring(1);
+    if (!hash) {
+        document.getElementById('status').innerHTML =
+            '<h2>❌ Токен не получен</h2><p>Попробуйте ещё раз.</p>';
+        return;
+    }
+    var params = {};
+    hash.split('&').forEach(function(p) {
+        var kv = p.split('=');
+        params[kv[0]] = decodeURIComponent(kv[1] || '');
+    });
+    if (!params.access_token) {
+        document.getElementById('status').innerHTML =
+            '<h2>❌ Токен не найден в ответе</h2>';
+        return;
+    }
+    fetch('/vk-auth/save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            access_token: params.access_token,
+            user_id: params.user_id || ''
+        })
+    }).then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (d.ok) {
+            document.getElementById('status').innerHTML =
+                '<h2>✅ Авторизация успешна!</h2>' +
+                '<p>Бот получил доступ к управлению сообществами.</p>' +
+                '<p>Можете закрыть эту страницу.</p>';
+        } else {
+            document.getElementById('status').innerHTML =
+                '<h2>❌ Ошибка сохранения</h2><p>' + (d.error || '') + '</p>';
+        }
+    }).catch(function(e) {
+        document.getElementById('status').innerHTML =
+            '<h2>❌ Ошибка связи</h2><p>' + e.message + '</p>';
+    });
+})();
+</script>
+</body></html>"""
 
 
 async def _approve_vk_request(
