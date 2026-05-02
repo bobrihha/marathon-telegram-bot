@@ -13,14 +13,16 @@ from sqlalchemy.orm import Session
 from .config import (
     ADMIN_IDS,
     BOT_TOKEN,
+    VK_APP_ID,
+    VK_APP_SECRET,
+    VK_CALLBACK_URL,
     VK_COMMUNITY_TOKEN,
     VK_CONFIRMATION_STRING,
-    VK_CALLBACK_URL,
     VK_GROUP_ID,
     VK_SECRET,
 )
 from .db.dal import SessionLocal
-from .db.models import AccessLog, CurrentGroup, Payment, User, VkGroup
+from .db.models import AccessLog, CurrentGroup, Payment, User, VkAdminAuth, VkGroup
 
 import aiohttp
 
@@ -640,19 +642,108 @@ async def _handle_support(vk_user_id: int, source_group: VkGroup | None = None) 
     )
 
 
+def _get_vk_admin_token() -> str | None:
+    """Get VK admin user token for group management (approve/remove)."""
+    db: Session = SessionLocal()
+    try:
+        auth = db.query(VkAdminAuth).order_by(VkAdminAuth.id.desc()).first()
+        return auth.access_token if auth else None
+    finally:
+        db.close()
+
+
+def vk_oauth_url() -> str | None:
+    """Generate VK OAuth authorization URL."""
+    if not VK_APP_ID:
+        return None
+    redirect_uri = VK_CALLBACK_URL.replace("/webhooks/vk", "/vk-auth/callback")
+    return (
+        f"https://oauth.vk.com/authorize?client_id={VK_APP_ID}"
+        f"&display=page&redirect_uri={redirect_uri}"
+        f"&scope=groups&response_type=code&v=5.199"
+    )
+
+
+async def handle_vk_oauth_callback(request: web.Request) -> web.Response:
+    """Handle VK OAuth redirect — exchange code for user token."""
+    code = request.query.get("code")
+    if not code:
+        return web.Response(
+            text="<h2>Ошибка: код авторизации не получен</h2>",
+            content_type="text/html",
+        )
+
+    redirect_uri = VK_CALLBACK_URL.replace("/webhooks/vk", "/vk-auth/callback")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            "https://oauth.vk.com/access_token",
+            params={
+                "client_id": VK_APP_ID,
+                "client_secret": VK_APP_SECRET,
+                "redirect_uri": redirect_uri,
+                "code": code,
+            },
+        ) as resp:
+            data = await resp.json(content_type=None)
+
+    if "access_token" not in data:
+        error = data.get("error_description", data.get("error", "unknown"))
+        logger.error("VK OAuth error: %s", data)
+        return web.Response(
+            text=f"<h2>Ошибка авторизации ВК</h2><p>{error}</p>",
+            content_type="text/html",
+        )
+
+    token = data["access_token"]
+    vk_user_id = str(data.get("user_id", ""))
+
+    db: Session = SessionLocal()
+    try:
+        auth = VkAdminAuth(
+            vk_user_id=vk_user_id,
+            access_token=token,
+            created_at=datetime.utcnow(),
+        )
+        db.add(auth)
+        db.commit()
+    finally:
+        db.close()
+
+    logger.info("VK admin OAuth completed for user %s", vk_user_id)
+
+    # Notify TG admins
+    await _notify_tg_admins(
+        f"✅ ВК-авторизация администратора получена!\n"
+        f"VK user_id: {vk_user_id}\n"
+        f"Теперь заявки в ВК-сообщества будут одобряться автоматически."
+    )
+
+    return web.Response(
+        text=(
+            "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>"
+            "<h2>✅ Авторизация успешна!</h2>"
+            "<p>Бот получил доступ к управлению сообществами.</p>"
+            "<p>Можете закрыть эту страницу.</p>"
+            "</body></html>"
+        ),
+        content_type="text/html",
+    )
+
+
 async def _approve_vk_request(
     vk_user_id: int,
     vk_group: VkGroup | None,
     callback_group_id: object,
 ) -> bool:
     group_id = _normalize_group_id(callback_group_id or (vk_group.vk_group_id if vk_group else None))
-    access_token = _vk_token(vk_group)
-    if not group_id or not access_token:
-        logger.warning("Cannot approve VK request: group_id/token missing")
+    # groups.approveRequest requires USER token, not community token
+    admin_token = _get_vk_admin_token()
+    if not group_id or not admin_token:
+        logger.warning("Cannot approve VK request: group_id/admin_token missing")
         return False
     result = await vk_api(
         "groups.approveRequest",
-        access_token=access_token,
+        access_token=admin_token,
         group_id=group_id,
         user_id=vk_user_id,
     )
@@ -665,13 +756,14 @@ async def _remove_vk_user(
     callback_group_id: object,
 ) -> bool:
     group_id = _normalize_group_id(callback_group_id or (vk_group.vk_group_id if vk_group else None))
-    access_token = _vk_token(vk_group)
-    if not group_id or not access_token:
-        logger.warning("Cannot remove VK user/request: group_id/token missing")
+    # groups.removeUser requires USER token, not community token
+    admin_token = _get_vk_admin_token()
+    if not group_id or not admin_token:
+        logger.warning("Cannot remove VK user/request: group_id/admin_token missing")
         return False
     result = await vk_api(
         "groups.removeUser",
-        access_token=access_token,
+        access_token=admin_token,
         group_id=group_id,
         user_id=vk_user_id,
     )

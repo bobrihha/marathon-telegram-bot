@@ -28,6 +28,8 @@ VK_COMMUNITY_TOKEN = os.getenv("VK_COMMUNITY_TOKEN", "")
 VK_GROUP_ID = int(os.getenv("VK_GROUP_ID", "0"))
 VK_SECRET = os.getenv("VK_SECRET", "")
 VK_CONFIRMATION_STRING = os.getenv("VK_CONFIRMATION_STRING", "")
+VK_APP_ID = os.getenv("VK_APP_ID", "")
+VK_APP_SECRET = os.getenv("VK_APP_SECRET", "")
 
 # VK Target community (for TG→VK forwarding)
 VK_TARGET_TOKEN = os.getenv("VK_TARGET_TOKEN", "")

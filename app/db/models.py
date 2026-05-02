@@ -81,3 +81,13 @@ class VkGroup(Base):
     callback_server_id = Column(String, nullable=True)
     callback_url = Column(String, nullable=True)
     callback_configured_at = Column(DateTime, nullable=True)
+
+
+class VkAdminAuth(Base):
+    __tablename__ = "vk_admin_auth"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    vk_user_id = Column(String, nullable=True)
+    access_token = Column(Text)
+    created_at = Column(DateTime)
+

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..config import ADMIN_IDS
 from ..db.dal import SessionLocal
-from ..db.models import AccessLog, CurrentGroup, Payment, User, VkGroup
+from ..db.models import AccessLog, CurrentGroup, Payment, User, VkAdminAuth, VkGroup
 
 router = Router()
 
@@ -27,6 +27,7 @@ ADMIN_REMOVE_USER = "Удалить участника"
 ADMIN_UNBAN_USER = "Разбанить участника"
 ADMIN_STATS = "📊 Статистика"
 ADMIN_VK_AUDIT = "🔍 Аудит ВК"
+ADMIN_VK_AUTH = "🔑 Авторизация ВК"
 ADMIN_CANCEL = "Отмена"
 
 ADMIN_MENU_BUTTONS = {
@@ -40,6 +41,7 @@ ADMIN_MENU_BUTTONS = {
     ADMIN_UNBAN_USER,
     ADMIN_STATS,
     ADMIN_VK_AUDIT,
+    ADMIN_VK_AUTH,
     ADMIN_CANCEL,
 }
 
@@ -48,6 +50,7 @@ ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=ADMIN_STATS), KeyboardButton(text=ADMIN_VK_AUDIT)],
         [KeyboardButton(text=ADMIN_SET_GROUP)],
         [KeyboardButton(text=ADMIN_SET_VK_GROUP)],
+        [KeyboardButton(text=ADMIN_VK_AUTH)],
         [KeyboardButton(text=ADMIN_FIND_PAYMENT)],
         [KeyboardButton(text=ADMIN_EXPORT_LOGS)],
         [KeyboardButton(text=ADMIN_REBIND_PAYMENT)],
@@ -448,6 +451,46 @@ async def admin_vk_audit(message: Message) -> None:
             await message.answer(chunk, reply_markup=ADMIN_MENU_KEYBOARD)
     else:
         await message.answer(text, reply_markup=ADMIN_MENU_KEYBOARD)
+
+
+@router.message(F.text == ADMIN_VK_AUTH)
+async def admin_vk_auth(message: Message) -> None:
+    if not is_admin(message):
+        return
+
+    from ..vk_bot import vk_oauth_url
+
+    # Check current auth status
+    db: Session = SessionLocal()
+    try:
+        auth = db.query(VkAdminAuth).order_by(VkAdminAuth.id.desc()).first()
+        if auth:
+            status = (
+                f"Текущая авторизация: VK user_id {auth.vk_user_id}\n"
+                f"Получена: {auth.created_at.strftime('%d.%m.%Y %H:%M') if auth.created_at else '—'}\n\n"
+            )
+        else:
+            status = "⚠️ Авторизация ВК не настроена.\n\n"
+    finally:
+        db.close()
+
+    url = vk_oauth_url()
+    if not url:
+        await message.answer(
+            f"{status}"
+            "Для настройки нужно добавить VK_APP_ID и VK_APP_SECRET в .env.\n"
+            "Обратитесь к разработчику.",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
+        return
+
+    await message.answer(
+        f"🔑 Авторизация ВК\n\n{status}"
+        "Перейдите по ссылке ниже и нажмите «Разрешить».\n"
+        "После этого бот сможет автоматически одобрять/отклонять "
+        f"заявки в ВК-сообществах.\n\n{url}",
+        reply_markup=ADMIN_MENU_KEYBOARD,
+    )
 
 
 @router.message(F.text == ADMIN_SET_GROUP)

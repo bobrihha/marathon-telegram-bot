@@ -193,6 +193,10 @@ def create_app() -> web.Application:
     from .vk_bot import register_vk_routes
     register_vk_routes(app)
 
+    # VK OAuth callback for admin user token
+    from .vk_bot import handle_vk_oauth_callback
+    app.router.add_get("/vk-auth/callback", handle_vk_oauth_callback)
+
     return app
 
 
