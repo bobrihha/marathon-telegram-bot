@@ -922,6 +922,24 @@ async def _handle_group_join_request(
         db.close()
 
 
+async def _is_group_manager(vk_user_id: int, group_id: object) -> bool:
+    """Check if user is a manager/editor/admin of the VK group."""
+    gid = _normalize_group_id(group_id)
+    if not gid:
+        return False
+    admin_token = _get_vk_admin_token()
+    if not admin_token:
+        return False
+    result = await vk_api(
+        "groups.getMembers",
+        access_token=admin_token,
+        group_id=gid,
+        filter="managers",
+    )
+    managers = result.get("response", {}).get("items", [])
+    return any(m.get("id") == vk_user_id for m in managers)
+
+
 async def _check_group_join(
     vk_user_id: int,
     source_group: VkGroup | None = None,
@@ -940,6 +958,12 @@ async def _check_group_join(
             ):
                 logger.info("VK group_join: user %s is approved (order %s)", vk_id_str, payment.order_id)
                 return
+
+        # Check if user is a group manager/editor — never remove them
+        group_id = callback_group_id or (source_group.vk_group_id if source_group else None)
+        if await _is_group_manager(vk_user_id, group_id):
+            logger.info("VK group_join: user %s is a group manager, skipping stranger check", vk_id_str)
+            return
 
         # Stranger! Get their info and alert admins
         result = await vk_api("users.get", user_ids=vk_user_id)
