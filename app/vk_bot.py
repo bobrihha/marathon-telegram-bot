@@ -483,6 +483,19 @@ async def handle_payment_check(
         db.add(log)
         db.commit()
 
+        # Try to auto-approve any pending VK join request for this user
+        try:
+            approved = await _approve_vk_request(
+                vk_user_id, vk_group, vk_group.vk_group_id
+            )
+            if approved:
+                logger.info(
+                    "Auto-approved pending VK join request for user %s after payment verification",
+                    vk_id_str,
+                )
+        except Exception as e:
+            logger.warning("Could not auto-approve VK join request for %s: %s", vk_id_str, e)
+
         # Also find matching TG group to send both links
         tg_group = select_tg_group_for_payment(db, payment)
 
@@ -897,12 +910,11 @@ async def _handle_group_join_request(
                 logger.info("VK join request approved for user %s", vk_id_str)
             return
 
-        removed = await _remove_vk_user(vk_user_id, source_group, callback_group_id)
-        result_text = "заявка отклонена" if removed else "заявка не одобрена"
-        await _notify_tg_admins(
-            f"Заявка в ВК без подтвержденной оплаты\n\n"
-            f"vk.com/id{vk_user_id}\n"
-            f"Результат: {result_text}."
+        # User not found or no valid payment — leave request pending
+        # (they might verify payment later through the VK bot)
+        logger.info(
+            "VK join request from user %s — no verified payment yet, leaving pending",
+            vk_id_str,
         )
     except Exception as e:
         logger.exception("Error handling VK join request: %s", e)
@@ -959,17 +971,18 @@ async def _check_group_join(
 
 async def _notify_tg_admins(text: str) -> None:
     """Send a notification to all TG admins via the Telegram bot."""
-    if not ADMIN_IDS:
+    if not ADMIN_IDS or not BOT_TOKEN:
         return
     try:
-        from .main import bot as tg_bot
+        tg_bot = Bot(token=BOT_TOKEN)
         for admin_id in ADMIN_IDS:
             try:
                 await tg_bot.send_message(admin_id, text)
             except Exception as e:
                 logger.error("Failed to notify TG admin %s: %s", admin_id, e)
+        await tg_bot.session.close()
     except Exception as e:
-        logger.error("Failed to import TG bot for admin notification: %s", e)
+        logger.error("Failed to create TG bot for admin notification: %s", e)
 
 
 def get_approved_vk_ids() -> list[dict]:
