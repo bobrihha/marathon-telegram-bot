@@ -489,19 +489,27 @@ async def handle_email_or_order(message: Message) -> None:
                     )
                 ]
             )
-            vk_info = f"\nВК-группа: {vk_group.group_name}"
+            vk_info = f"\n📌 ВК-сообщество: {vk_group.group_name}"
 
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        next_step = "Нажми кнопки ниже и отправь заявки на вступление."
+        next_step = (
+            "Перейдите по ссылкам ниже и подайте заявку — "
+            "она будет принята автоматически."
+        )
         if vk_requires_bot_check:
             next_step = (
-                "Нажми кнопки ниже. Для ВК сначала открой сообщения сообщества "
-                "и отправь туда тот же телефон или email, чтобы бот привязал твой VK-аккаунт."
+                "Для Телеграм — перейдите по ссылке и подайте заявку в группу, "
+                "она будет принята автоматически.\n"
+                "Для ВК — откройте сообщения сообщества и отправьте "
+                "тот же телефон или email для привязки аккаунта."
             )
 
         await message.answer(
             "Оплата найдена ✅\n\n"
-            f"Телеграм-группа: {current_group.group_name}{vk_info}\n"
+            "Вам доступны две площадки — они дублируют друг друга, "
+            f"можно вступить в любую или в обе:\n\n"
+            f"📌 Телеграм-группа: {current_group.group_name}"
+            f"{vk_info}\n\n"
             f"{next_step}",
             reply_markup=kb,
         )

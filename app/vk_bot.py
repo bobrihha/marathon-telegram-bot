@@ -491,13 +491,21 @@ async def handle_payment_check(
                 vk_user_id=vk_user_id,
             )
             if tg_invite_link:
-                tg_info = f"\n\nТелеграм-группа: {tg_group.group_name}\nСсылка: {tg_invite_link}"
+                tg_info = (
+                    f"\n\n📌 Телеграм-группа: {tg_group.group_name}\n"
+                    f"Перейдите по ссылке и подайте заявку в группу — "
+                    f"она будет принята автоматически 👇\n{tg_invite_link}"
+                )
 
         await vk_send_message(
             vk_user_id,
             f"Оплата найдена ✅\n\n"
-            f"ВК-чат марафона: {vk_group.group_name}\n"
-            f"Вступай по ссылке 👇\n{vk_group.invite_link}"
+            f"Вам доступны две площадки — они дублируют друг друга, "
+            f"можно вступить в любую или в обе:\n\n"
+            f"📌 ВК-сообщество: {vk_group.group_name}\n"
+            f"Перейдите по ссылке и подайте заявку на вступление — "
+            f"она будет принята автоматически 👇\n"
+            f"{vk_group.invite_link}"
             f"{tg_info}",
             keyboard=main_keyboard(),
             access_token=access_token,
