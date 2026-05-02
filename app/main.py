@@ -366,15 +366,16 @@ async def handle_email_or_order(message: Message) -> None:
         if not payment:
             if used_payment:
                 existing_user = db.query(User).filter(User.payment_id == used_payment.id).first()
-                if existing_user and existing_user.telegram_id == str(message.from_user.id):
-                    payment = used_payment  # Same TG user — allow re-access
-                else:
+                if existing_user and existing_user.telegram_id and existing_user.telegram_id != str(message.from_user.id):
+                    # Payment genuinely used by a DIFFERENT TG user
                     await message.answer(
                         "Эта оплата уже использована другим пользователем.\n"
                         "Каждая оплата даёт доступ одному человеку.\n"
                         "Если это ошибка — напиши в поддержку."
                     )
                     return
+                # Same user re-accessing OR user created via VK (tg_id=None)
+                payment = used_payment
 
             if not payment:
                 await message.answer(
@@ -387,8 +388,8 @@ async def handle_email_or_order(message: Message) -> None:
                 return
 
         existing_user = db.query(User).filter(User.payment_id == payment.id).first()
-        if existing_user and existing_user.telegram_id != str(message.from_user.id):
-            # Payment is linked to a different user — block
+        if existing_user and existing_user.telegram_id and existing_user.telegram_id != str(message.from_user.id):
+            # Payment is linked to a different REAL TG user — block
             await message.answer(
                 "Эта оплата уже использована другим пользователем.\n"
                 "Каждая оплата даёт доступ одному человеку.\n"
