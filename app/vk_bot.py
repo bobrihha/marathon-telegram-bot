@@ -384,10 +384,8 @@ async def handle_payment_check(
         if not payment:
             if used_payment:
                 existing_user = db.query(User).filter(User.payment_id == used_payment.id).first()
-                if existing_user and existing_user.vk_id == vk_id_str:
-                    # Same VK user — allow re-access
-                    payment = used_payment
-                else:
+                if existing_user and existing_user.vk_id and existing_user.vk_id != vk_id_str:
+                    # Payment genuinely used by a DIFFERENT VK user
                     await vk_send_message(
                         vk_user_id,
                         "Эта оплата уже использована другим пользователем.\n"
@@ -397,6 +395,8 @@ async def handle_payment_check(
                         access_token=access_token,
                     )
                     return
+                # Same user re-accessing OR user created via TG (vk_id=None)
+                payment = used_payment
 
             if not payment:
                 await vk_send_message(
@@ -413,7 +413,8 @@ async def handle_payment_check(
 
         # Check if payment is linked to another VK user
         existing_user = db.query(User).filter(User.payment_id == payment.id).first()
-        if existing_user and existing_user.vk_id != vk_id_str:
+        if existing_user and existing_user.vk_id and existing_user.vk_id != vk_id_str:
+            # Payment linked to a DIFFERENT real VK user
             await vk_send_message(
                 vk_user_id,
                 "Эта оплата уже использована с другим ВК-аккаунтом.\n"
