@@ -14,3 +14,15 @@ venv/
 .idea/
 .vscode/
 .DS_Store
+.env.*
+*.key
+*.pem
+*credentials*.json
+service_account.json
+secret.key
+*.sqlite
+node_modules/
+*.log
+!.env.example
+!.env.sample
+!.env.template

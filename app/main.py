@@ -223,7 +223,7 @@ async def handle_support_message(message: Message, state: FSMContext) -> None:
                 [
                     InlineKeyboardButton(
                         text=SUPPORT_REPLY_BUTTON,
-                        callback_data=f"support_reply:{user.id}",
+                        callback_data=f"support_reply:tg:{user.id}",
                     )
                 ]
             ]
@@ -251,13 +251,23 @@ async def support_reply_callback(query: CallbackQuery, state: FSMContext) -> Non
         await query.answer()
         return
 
-    data = query.data.split(":", 1)
-    if len(data) != 2 or not data[1].isdigit():
+    data = query.data.split(":")
+    if len(data) == 2:
+        platform = "tg"
+        uid = data[1]
+    elif len(data) == 3:
+        platform = data[1]
+        uid = data[2]
+    else:
         await query.answer("Некорректный запрос", show_alert=True)
         return
 
+    if not uid.isdigit():
+        await query.answer("Некорректный ID", show_alert=True)
+        return
+
     await state.set_state(AdminReplyStates.waiting_reply)
-    await state.update_data(reply_user_id=int(data[1]))
+    await state.update_data(reply_user_id=int(uid), reply_platform=platform)
     await query.message.answer(
         "Введите ответ для пользователя.",
         reply_markup=ADMIN_REPLY_KEYBOARD,
@@ -282,24 +292,134 @@ async def handle_admin_reply(message: Message, state: FSMContext) -> None:
 
     data = await state.get_data()
     reply_user_id = data.get("reply_user_id")
+    reply_platform = data.get("reply_platform", "tg")
     if not reply_user_id:
         await state.clear()
         await message.answer("Не вижу получателя, начни заново.", reply_markup=ADMIN_MENU_KEYBOARD)
         return
 
     try:
-        await bot.send_message(
-            reply_user_id,
-            f"Ответ поддержки:\n{text}",
-        )
+        if reply_platform == "vk":
+            from .vk_bot import vk_send_message
+            await vk_send_message(
+                reply_user_id,
+                f"Ответ поддержки:\n{text}",
+            )
+        else:
+            await bot.send_message(
+                reply_user_id,
+                f"Ответ поддержки:\n{text}",
+            )
         await message.answer("Ответ отправлен пользователю.", reply_markup=ADMIN_MENU_KEYBOARD)
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("Failed to send admin reply: %s", e)
         await message.answer(
             "Не удалось отправить ответ пользователю.",
             reply_markup=ADMIN_MENU_KEYBOARD,
         )
     finally:
         await state.clear()
+
+
+async def _resend_access_links(message: Message, db: Session, payment: Payment) -> None:
+    """Re-send the access links for a user who already redeemed this payment.
+
+    Mirrors the VK bot's smart resend: instead of a dead-end "ссылка выдаётся
+    один раз", hand the user the working link to their (current) group again so
+    they don't fall back to tapping stale invite buttons from past marathons
+    that still sit in the chat history.
+    """
+    product = (payment.product_name or "").lower()
+
+    current_group = None
+    if product:
+        current_group = (
+            db.query(CurrentGroup)
+            .filter(CurrentGroup.product_tag == product)
+            .order_by(CurrentGroup.id.desc())
+            .first()
+        )
+    if not current_group:
+        current_group = (
+            db.query(CurrentGroup)
+            .filter(CurrentGroup.product_tag.is_(None))
+            .order_by(CurrentGroup.id.desc())
+            .first()
+        )
+    if not current_group and not product:
+        current_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
+
+    if not current_group or not current_group.invite_link:
+        await message.answer(
+            "У тебя уже есть доступ ✅\n"
+            "Если что-то не так — напиши в поддержку."
+        )
+        return
+
+    vk_group = None
+    if product:
+        vk_group = (
+            db.query(VkGroup)
+            .filter(VkGroup.product_tag == product)
+            .order_by(VkGroup.id.desc())
+            .first()
+        )
+    if not vk_group:
+        vk_group = (
+            db.query(VkGroup)
+            .filter(VkGroup.product_tag.is_(None))
+            .order_by(VkGroup.id.desc())
+            .first()
+        )
+    if not vk_group and not product:
+        vk_group = db.query(VkGroup).order_by(VkGroup.id.desc()).first()
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="Вступить в Телеграм-группу 🔐",
+                url=current_group.invite_link,
+            )
+        ]
+    ]
+    vk_info = ""
+    vk_requires_bot_check = False
+    if vk_group and vk_group.invite_link:
+        vk_button_url = vk_group.invite_link
+        vk_button_text = "Вступить в ВК-группу 🔐"
+        if vk_group.access_token and vk_group.vk_group_id and vk_group.vk_group_id != "chat":
+            vk_button_url = f"https://vk.com/im?sel=-{str(vk_group.vk_group_id).lstrip('-')}"
+            vk_button_text = "Открыть ВК-бота 🔐"
+            vk_requires_bot_check = True
+        buttons.append(
+            [InlineKeyboardButton(text=vk_button_text, url=vk_button_url)]
+        )
+        vk_info = f"\n📌 ВК-сообщество: {vk_group.group_name}"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    next_step = (
+        "Перейдите по ссылкам ниже и подайте заявку — "
+        "она будет принята автоматически."
+    )
+    if vk_requires_bot_check:
+        next_step = (
+            "Для Телеграм — перейдите по ссылке и подайте заявку в группу, "
+            "она будет принята автоматически.\n\n"
+            "Для ВК — откройте сообщения сообщества (кнопка «Открыть ВК-бота») "
+            "и обязательно напишите туда тот же email или телефон, "
+            "который указали при оплате. Только после этого я смогу "
+            "автоматически принять заявку в ВК-сообщество."
+        )
+
+    await message.answer(
+        "У тебя уже есть доступ ✅\n\n"
+        "Высылаю ссылки ещё раз:\n\n"
+        f"📌 Телеграм-группа: {current_group.group_name}"
+        f"{vk_info}\n\n"
+        f"{next_step}",
+        reply_markup=kb,
+    )
 
 
 @dp.message(
@@ -349,7 +469,7 @@ async def handle_email_or_order(message: Message) -> None:
                 filters.append(Payment.phone.endswith(phone_last10))
             payment = (
                 db.query(Payment)
-                .filter(Payment.status == "paid")
+                .filter(Payment.status == "paid", Payment.used.is_(False))
                 .filter(or_(*filters))
                 .order_by(Payment.created_at.desc(), Payment.id.desc())
                 .first()
@@ -374,8 +494,16 @@ async def handle_email_or_order(message: Message) -> None:
                         "Если это ошибка — напиши в поддержку."
                     )
                     return
-                # Same user re-accessing OR user created via VK (tg_id=None)
-                payment = used_payment
+                # Allow VK→TG bridge: user paid via VK, first time in TG
+                if existing_user and existing_user.vk_id and not existing_user.telegram_id:
+                    payment = used_payment
+                else:
+                    # Payment already redeemed by THIS user — instead of a
+                    # dead-end "ссылка выдаётся один раз", re-send the working
+                    # link to the current group so they don't tap stale invite
+                    # buttons from older marathons sitting in the chat history.
+                    await _resend_access_links(message, db, used_payment)
+                    return
 
             if not payment:
                 await message.answer(
@@ -438,7 +566,9 @@ async def handle_email_or_order(message: Message) -> None:
             current_group = db.query(CurrentGroup).filter(
                 CurrentGroup.product_tag.is_(None)
             ).order_by(CurrentGroup.id.desc()).first()
-        if not current_group:
+        # Last-resort "any group" only for payments WITHOUT a product tag, so a
+        # named product never lands in an unrelated marathon's group.
+        if not current_group and not product:
             current_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
 
         if not current_group:
@@ -459,7 +589,7 @@ async def handle_email_or_order(message: Message) -> None:
             vk_group = db.query(VkGroup).filter(
                 VkGroup.product_tag.is_(None)
             ).order_by(VkGroup.id.desc()).first()
-        if not vk_group:
+        if not vk_group and not product:
             vk_group = db.query(VkGroup).order_by(VkGroup.id.desc()).first()
 
         db.commit()
@@ -500,9 +630,11 @@ async def handle_email_or_order(message: Message) -> None:
         if vk_requires_bot_check:
             next_step = (
                 "Для Телеграм — перейдите по ссылке и подайте заявку в группу, "
-                "она будет принята автоматически.\n"
-                "Для ВК — откройте сообщения сообщества и отправьте "
-                "тот же телефон или email для привязки аккаунта."
+                "она будет принята автоматически.\n\n"
+                "Для ВК — откройте сообщения сообщества (кнопка «Открыть ВК-бота») "
+                "и обязательно напишите туда тот же email или телефон, "
+                "который указали при оплате. Только после этого я смогу "
+                "автоматически принять заявку в ВК-сообщество."
             )
 
         await message.answer(

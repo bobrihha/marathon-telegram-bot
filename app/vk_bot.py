@@ -1,5 +1,6 @@
 """VK Community Bot — payment verification & group access."""
 
+import asyncio
 import json
 import logging
 import secrets
@@ -28,6 +29,37 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 _PENDING_CALLBACK_CONFIRMATIONS: dict[str, str] = {}
+_PENDING_SUPPORT: set[int] = set()  # VK user_ids waiting to send support message
+# Recently processed VK callback event_ids to dedupe retries the bot already
+# answered with "ok" (belt-and-suspenders against any leftover retry storms).
+_RECENT_VK_EVENT_IDS: dict[str, float] = {}
+_VK_EVENT_DEDUP_TTL = 300.0  # seconds
+
+
+def _vk_event_already_seen(event_id: str | None) -> bool:
+    """Return True if this event_id was seen recently (and refresh the cache)."""
+    if not event_id:
+        return False
+    now = asyncio.get_event_loop().time()
+    # Drop expired entries
+    expired = [k for k, ts in _RECENT_VK_EVENT_IDS.items() if now - ts > _VK_EVENT_DEDUP_TTL]
+    for k in expired:
+        _RECENT_VK_EVENT_IDS.pop(k, None)
+    if event_id in _RECENT_VK_EVENT_IDS:
+        return True
+    _RECENT_VK_EVENT_IDS[event_id] = now
+    return False
+
+
+def _spawn_vk_task(coro) -> None:
+    """Run a VK event handler in the background and never let exceptions escape."""
+    async def _runner():
+        try:
+            await coro
+        except Exception:
+            logger.exception("VK event handler crashed")
+
+    asyncio.create_task(_runner())
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +125,7 @@ async def vk_invite_to_group(user_id: int, group_id: int, access_token: str | No
 def main_keyboard() -> dict:
     """Main keyboard with action buttons."""
     return {
-        "one_time": False,
+        "inline": True,
         "buttons": [
             [
                 {
@@ -101,6 +133,22 @@ def main_keyboard() -> dict:
                     "color": "primary",
                 }
             ],
+            [
+                {
+                    "action": {"type": "text", "label": "Поддержка"},
+                    "color": "default",
+                }
+            ],
+        ],
+    }
+
+
+def granted_keyboard() -> dict:
+    """Keyboard shown after access has been granted — no «Проверить оплату»
+    button so users don't reflexively re-tap it and get «уже использована»."""
+    return {
+        "inline": True,
+        "buttons": [
             [
                 {
                     "action": {"type": "text", "label": "Поддержка"},
@@ -126,6 +174,42 @@ def phone_variants(value: str) -> tuple[str | None, str | None]:
         return None, None
     last10 = digits[-10:] if len(digits) >= 10 else digits
     return digits, last10
+
+
+def _looks_like_payment_data(text: str) -> bool:
+    """Heuristic: is this string plausibly an email / phone / order_id?
+
+    Anything else (greetings, questions, "спасибо", emoji, free-form text) is
+    NOT routed through handle_payment_check, so the bot stops replying with
+    "Я не нашла оплаченный заказ" to casual chat.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    if "@" in t:
+        return True
+    if len(normalize_phone(t)) >= 10:
+        return True
+    # Order_id: short, single token, alphanumeric (+ - _), no spaces, no
+    # cyrillic letters. Prodamus order_ids fit this shape.
+    if " " not in t and len(t) <= 64:
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+        if all(ch in allowed for ch in t):
+            return True
+    return False
+
+
+def _is_verified_vk_user(vk_user_id: int) -> bool:
+    """Return True if this VK user already has a paid Payment linked."""
+    db: Session = SessionLocal()
+    try:
+        user = db.query(User).filter(User.vk_id == str(vk_user_id)).first()
+        if not user or not user.payment_id:
+            return False
+        payment = user.payment
+        return bool(payment and payment.status == "paid")
+    finally:
+        db.close()
 
 
 def _vk_token(vk_group: VkGroup | None = None) -> str | None:
@@ -172,7 +256,10 @@ def select_vk_group_for_payment(db: Session, payment: Payment) -> VkGroup | None
             .order_by(VkGroup.id.desc())
             .first()
         )
-    if not vk_group:
+    # Last-resort "any group" only for payments WITHOUT a product tag.
+    # A payment that names a product but matches no tagged/general group must
+    # NOT be dumped into a random (e.g. a different marathon's) group.
+    if not vk_group and not product:
         vk_group = db.query(VkGroup).order_by(VkGroup.id.desc()).first()
     return vk_group
 
@@ -194,7 +281,8 @@ def select_tg_group_for_payment(db: Session, payment: Payment) -> CurrentGroup |
             .order_by(CurrentGroup.id.desc())
             .first()
         )
-    if not tg_group:
+    # Last-resort "any group" only for payments WITHOUT a product tag.
+    if not tg_group and not product:
         tg_group = db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
     return tg_group
 
@@ -269,7 +357,11 @@ async def configure_vk_callback_server(
 ) -> dict:
     """Create a VK Callback API server and enable message/join events."""
     url = callback_url or VK_CALLBACK_URL
-    secret_key = secrets.token_urlsafe(24)
+    # VK Callback secret_key accepts only Latin letters and digits — token_urlsafe
+    # can emit "-"/"_" and VK rejects it as "invalid secret_key" (~64% of the time),
+    # which is why setup used to succeed only intermittently. token_hex is always
+    # alphanumeric (32 hex chars, well within VK's 50-char limit).
+    secret_key = secrets.token_hex(16)
 
     confirmation_result = await vk_api(
         "groups.getCallbackConfirmationCode",
@@ -366,7 +458,7 @@ async def handle_payment_check(
                 filters.append(Payment.phone.endswith(phone_last10))
             payment = (
                 db.query(Payment)
-                .filter(Payment.status == "paid")
+                .filter(Payment.status == "paid", Payment.used.is_(False))
                 .filter(or_(*filters))
                 .order_by(Payment.created_at.desc(), Payment.id.desc())
                 .first()
@@ -395,8 +487,30 @@ async def handle_payment_check(
                         access_token=access_token,
                     )
                     return
-                # Same user re-accessing OR user created via TG (vk_id=None)
-                payment = used_payment
+                # Allow TG→VK bridge: user paid via TG, first time in VK
+                if existing_user and existing_user.telegram_id and not existing_user.vk_id:
+                    payment = used_payment
+                elif existing_user and existing_user.vk_id == vk_id_str:
+                    # Same VK user re-checking their own payment — resend the
+                    # link instead of refusing, so they stop tapping in panic.
+                    await _resend_granted_links(
+                        vk_user_id=vk_user_id,
+                        payment=used_payment,
+                        db=db,
+                        access_token=access_token,
+                    )
+                    return
+                else:
+                    # Payment already used — no re-issue
+                    await vk_send_message(
+                        vk_user_id,
+                        "Эта оплата уже была использована ✅\n"
+                        "Ссылка на группу выдаётся один раз.\n\n"
+                        "Если вы не получили доступ — напишите в поддержку.",
+                        keyboard=main_keyboard(),
+                        access_token=access_token,
+                    )
+                    return
 
             if not payment:
                 await vk_send_message(
@@ -523,11 +637,52 @@ async def handle_payment_check(
             f"она будет принята автоматически 👇\n"
             f"{vk_group.invite_link}"
             f"{tg_info}",
-            keyboard=main_keyboard(),
+            keyboard=granted_keyboard(),
             access_token=access_token,
         )
     finally:
         db.close()
+
+
+async def _resend_granted_links(
+    vk_user_id: int,
+    payment: Payment,
+    db: Session,
+    access_token: str | None,
+) -> None:
+    """Re-send the same access links to a user who is already verified for this
+    payment. No new bindings, no new TG one-use links, no new approvals — just
+    repeat the info so the user stops tapping «Проверить оплату» in panic."""
+    vk_group = select_vk_group_for_payment(db, payment)
+    if not vk_group or not vk_group.invite_link:
+        await vk_send_message(
+            vk_user_id,
+            "У тебя уже есть доступ ✅\n"
+            "Если что-то не так — напиши в поддержку.",
+            keyboard=granted_keyboard(),
+            access_token=access_token,
+        )
+        return
+
+    tg_group = select_tg_group_for_payment(db, payment)
+    tg_info = ""
+    if tg_group and tg_group.invite_link:
+        tg_info = (
+            f"\n\n📌 Телеграм-группа: {tg_group.group_name}\n"
+            f"Ссылка для входа 👇\n{tg_group.invite_link}"
+        )
+
+    await vk_send_message(
+        vk_user_id,
+        f"У тебя уже есть доступ ✅\n\n"
+        f"Высылаю ссылки ещё раз:\n\n"
+        f"📌 ВК-сообщество: {vk_group.group_name}\n"
+        f"{vk_group.invite_link}"
+        f"{tg_info}\n\n"
+        f"Если возник вопрос — нажми «Поддержка».",
+        keyboard=granted_keyboard(),
+        access_token=access_token,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +730,16 @@ async def handle_vk_callback(request: web.Request) -> web.Response:
         logger.warning("VK callback: invalid secret")
         return web.Response(text="bad secret", status=403)
 
-    # New message
+    # Dedupe: if VK already retried this event before we deployed the fast-ack
+    # fix, drop the duplicate so we don't re-send the same DM.
+    event_id = data.get("event_id")
+    if _vk_event_already_seen(event_id):
+        logger.info("VK callback: duplicate event_id=%s, skipping", event_id)
+        return web.Response(text="ok")
+
+    # IMPORTANT: schedule handlers as background tasks and reply "ok" immediately.
+    # VK Callback API retries the event if it does not get "ok" within ~10s,
+    # which previously caused the same DM to be sent multiple times in a row.
     if event_type == "message_new":
         obj = data.get("object", {})
         message = obj.get("message", obj)  # v5.199 wraps in "message"
@@ -583,18 +747,23 @@ async def handle_vk_callback(request: web.Request) -> web.Response:
         text = (message.get("text") or "").strip()
 
         if vk_user_id and text:
-            await _process_message(vk_user_id, text, source_group=source_group)
+            _spawn_vk_task(
+                _process_message(vk_user_id, text, source_group=source_group)
+            )
 
-    # Someone joined the VK group — check if they are approved
     elif event_type == "group_join":
         obj = data.get("object", {})
         vk_user_id = obj.get("user_id")
         join_type = (obj.get("join_type") or obj.get("type") or "").lower()
         if vk_user_id:
             if join_type == "request":
-                await _handle_group_join_request(vk_user_id, source_group, group_id)
+                _spawn_vk_task(
+                    _handle_group_join_request(vk_user_id, source_group, group_id)
+                )
             else:
-                await _check_group_join(vk_user_id, source_group, group_id)
+                _spawn_vk_task(
+                    _check_group_join(vk_user_id, source_group, group_id)
+                )
 
     return web.Response(text="ok")
 
@@ -615,8 +784,9 @@ async def _process_message(
             vk_user_id,
             "Привет! Я бот марафона 🏃‍♀️\n\n"
             "Я выдаю доступ в закрытую ВК-группу после оплаты.\n"
-            "Нажми кнопку «Проверить оплату» и отправь email или "
-            "номер телефона, который ты указал(а) при оплате.",
+            "Нажми кнопку «Проверить оплату» под этим сообщением "
+            "ИЛИ просто отправь мне текстом номер телефона (или email), "
+            "который ты указал(а) при оплате.",
             keyboard=main_keyboard(),
             access_token=access_token,
         )
@@ -629,15 +799,49 @@ async def _process_message(
         )
     elif text_lower == "поддержка":
         await _handle_support(vk_user_id, source_group=source_group)
-    else:
-        # Treat as payment data (email, phone, order_id)
+    elif vk_user_id in _PENDING_SUPPORT:
+        # User is sending a support message
+        _PENDING_SUPPORT.discard(vk_user_id)
+        await _forward_support_message(vk_user_id, text, source_group=source_group)
+    elif _looks_like_payment_data(text):
         await handle_payment_check(vk_user_id, text, source_group=source_group)
+    elif _is_verified_vk_user(vk_user_id):
+        await vk_send_message(
+            vk_user_id,
+            "Доступ у тебя уже есть ✅\n"
+            "Если есть вопрос — нажми «Поддержка», и я передам админу.",
+            keyboard=main_keyboard(),
+            access_token=access_token,
+        )
+    else:
+        await vk_send_message(
+            vk_user_id,
+            "Чтобы я нашла твою оплату, пришли email или номер телефона, "
+            "который ты указал(а) при оплате.\n\n"
+            "Если есть вопрос — нажми «Поддержка».",
+            keyboard=main_keyboard(),
+            access_token=access_token,
+        )
 
 
 async def _handle_support(vk_user_id: int, source_group: VkGroup | None = None) -> None:
-    """Send support info and notify admins that user needs help."""
+    """Ask user for their question and remember they're in support mode."""
     access_token = _vk_token(source_group)
-    # Get VK user info for the support message
+    _PENDING_SUPPORT.add(vk_user_id)
+    await vk_send_message(
+        vk_user_id,
+        "Напиши свой вопрос одним сообщением — я передам администратору.",
+        keyboard=main_keyboard(),
+        access_token=access_token,
+    )
+
+
+async def _forward_support_message(
+    vk_user_id: int, text: str, source_group: VkGroup | None = None
+) -> None:
+    """Forward user's support message to TG admins."""
+    access_token = _vk_token(source_group)
+    # Get VK user info
     result = await vk_api("users.get", access_token=access_token, user_ids=vk_user_id)
     users = result.get("response", [])
     if users:
@@ -647,10 +851,22 @@ async def _handle_support(vk_user_id: int, source_group: VkGroup | None = None) 
     else:
         user_label = f"VK ID {vk_user_id}"
 
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    reply_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Ответить", callback_data=f"support_reply:vk:{vk_user_id}")]
+        ]
+    )
+
+    await _notify_tg_admins(
+        f"📩 Запрос поддержки из ВК:\n"
+        f"{user_label}\n"
+        f"Сообщение: {text}",
+        reply_markup=reply_markup
+    )
     await vk_send_message(
         vk_user_id,
-        "Напиши свой вопрос одним сообщением — я передам администратору.\n"
-        "Или напиши напрямую администратору марафона.",
+        "Спасибо! Сообщение передано администратору. ✅",
         keyboard=main_keyboard(),
         access_token=access_token,
     )
@@ -911,11 +1127,26 @@ async def _handle_group_join_request(
             return
 
         # User not found or no valid payment — leave request pending
-        # (they might verify payment later through the VK bot)
+        # and prompt the user to verify payment via VK bot DM.
         logger.info(
             "VK join request from user %s — no verified payment yet, leaving pending",
             vk_id_str,
         )
+        try:
+            await vk_send_message(
+                vk_user_id,
+                "Привет! Я получила твою заявку на вступление 🙌\n\n"
+                "Чтобы я приняла её автоматически — напиши мне сюда "
+                "email или номер телефона, который ты указал(а) при оплате.\n\n"
+                "Как только проверю оплату — сразу одобрю заявку.",
+                keyboard=main_keyboard(),
+                access_token=_vk_token(source_group),
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not DM VK user %s with verification prompt: %s",
+                vk_id_str, e,
+            )
     except Exception as e:
         logger.exception("Error handling VK join request: %s", e)
     finally:
@@ -991,7 +1222,7 @@ async def _check_group_join(
         db.close()
 
 
-async def _notify_tg_admins(text: str) -> None:
+async def _notify_tg_admins(text: str, reply_markup=None) -> None:
     """Send a notification to all TG admins via the Telegram bot."""
     if not ADMIN_IDS or not BOT_TOKEN:
         return
@@ -999,7 +1230,7 @@ async def _notify_tg_admins(text: str) -> None:
         tg_bot = Bot(token=BOT_TOKEN)
         for admin_id in ADMIN_IDS:
             try:
-                await tg_bot.send_message(admin_id, text)
+                await tg_bot.send_message(admin_id, text, reply_markup=reply_markup)
             except Exception as e:
                 logger.error("Failed to notify TG admin %s: %s", admin_id, e)
         await tg_bot.session.close()

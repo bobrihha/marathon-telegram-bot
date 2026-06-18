@@ -21,6 +21,7 @@ ADMIN_MENU = "Админ-меню"
 ADMIN_SET_GROUP = "Установить группу"
 ADMIN_SET_VK_GROUP = "Установить ВК-группу"
 ADMIN_EXPORT_LOGS = "Выгрузить логи"
+ADMIN_GROUPS = "🗂 Группы"
 ADMIN_FIND_PAYMENT = "Найти оплату"
 ADMIN_REBIND_PAYMENT = "Перепривязать оплату"
 ADMIN_REMOVE_USER = "Удалить участника"
@@ -35,6 +36,7 @@ ADMIN_MENU_BUTTONS = {
     ADMIN_SET_GROUP,
     ADMIN_SET_VK_GROUP,
     ADMIN_EXPORT_LOGS,
+    ADMIN_GROUPS,
     ADMIN_FIND_PAYMENT,
     ADMIN_REBIND_PAYMENT,
     ADMIN_REMOVE_USER,
@@ -51,6 +53,7 @@ ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=ADMIN_SET_GROUP)],
         [KeyboardButton(text=ADMIN_SET_VK_GROUP)],
         [KeyboardButton(text=ADMIN_VK_AUTH)],
+        [KeyboardButton(text=ADMIN_GROUPS)],
         [KeyboardButton(text=ADMIN_FIND_PAYMENT)],
         [KeyboardButton(text=ADMIN_EXPORT_LOGS)],
         [KeyboardButton(text=ADMIN_REBIND_PAYMENT)],
@@ -74,6 +77,7 @@ class AdminStates(StatesGroup):
     export_start = State()
     export_end = State()
     export_group = State()
+    delete_group = State()
     find_payment = State()
     rebind_key = State()
     rebind_telegram = State()
@@ -111,7 +115,7 @@ async def send_payment_info(message: Message, query: str) -> None:
     db: Session = SessionLocal()
     try:
         phone, phone_last10 = phone_variants(query)
-        filters = [Payment.email == query, Payment.order_id == query]
+        filters = [func.lower(Payment.email) == query.lower(), Payment.order_id == query]
         if phone:
             filters.append(Payment.phone == phone)
         if phone_last10 and len(phone_last10) >= 10:
@@ -252,7 +256,7 @@ async def rebind_payment_to_user(
     db: Session = SessionLocal()
     try:
         phone, phone_last10 = phone_variants(payment_key)
-        filters = [Payment.email == payment_key, Payment.order_id == payment_key]
+        filters = [func.lower(Payment.email) == payment_key.lower(), Payment.order_id == payment_key]
         if phone:
             filters.append(Payment.phone == phone)
         if phone_last10 and len(phone_last10) >= 10:
@@ -332,7 +336,8 @@ async def admin_help(message: Message) -> None:
         "/export_logs <YYYY-MM-DD> <YYYY-MM-DD> [название группы] — CSV выгрузка\n"
         "/rebind_payment <email|телефон|order_id> <telegram_id> — перепривязать оплату\n"
         "В меню есть кнопка «Удалить участника»\n"
-        "«Установить ВК-группу» — добавить ссылку, тег продукта и токен сообщества"
+        "«Установить ВК-группу» — добавить ссылку, тег продукта и токен сообщества\n"
+        "«🗂 Группы» — список всех групп и удаление завершённых марафонов"
     )
 
 
@@ -473,10 +478,13 @@ async def admin_vk_auth(message: Message, state: FSMContext) -> None:
     finally:
         db.close()
 
+    # Kate Mobile app (2685278) — the VK Admin app 6121396 is blocked ("application
+    # is blocked"). "offline" scope makes the token non-expiring so VK approvals
+    # don't silently break again. revoke=1 forces a fresh consent screen.
     token_url = (
-        "https://oauth.vk.com/authorize?client_id=6121396"
+        "https://oauth.vk.com/authorize?client_id=2685278"
         "&display=page&redirect_uri=https://oauth.vk.com/blank.html"
-        "&scope=groups&response_type=token&v=5.199"
+        "&scope=groups,offline&response_type=token&revoke=1&v=5.199"
     )
 
     await state.set_state(AdminStates.set_vk_admin_token)
@@ -484,6 +492,8 @@ async def admin_vk_auth(message: Message, state: FSMContext) -> None:
         f"🔑 Авторизация ВК\n\n{status}"
         "Чтобы бот мог одобрять заявки в сообществах, "
         "нужен пользовательский токен ВК.\n\n"
+        "⚠️ Войдите аккаунтом, который является администратором "
+        "сообщества — иначе бот не сможет принимать заявки.\n\n"
         "📋 Инструкция:\n"
         f"1. Перейдите по ссылке:\n{token_url}\n\n"
         "2. Нажмите «Разрешить»\n"
@@ -550,10 +560,44 @@ async def admin_set_vk_admin_token(message: Message, state: FSMContext) -> None:
         db.close()
 
     await state.clear()
+
+    # Show which configured VK communities this token can actually manage, so a
+    # token from the wrong (non-admin) account is caught immediately instead of
+    # silently failing to approve join requests later.
+    coverage = ""
+    try:
+        admin_resp = await vk_api(
+            "groups.get", access_token=token, filter="admin", extended=1, count=1000
+        )
+        admin_ids = {
+            str(g.get("id"))
+            for g in admin_resp.get("response", {}).get("items", [])
+        }
+        db = SessionLocal()
+        try:
+            vk_groups = db.query(VkGroup).order_by(VkGroup.id.asc()).all()
+        finally:
+            db.close()
+
+        checkable = [g for g in vk_groups if str(g.vk_group_id).lstrip("-").isdigit()]
+        if checkable:
+            lines = []
+            for g in checkable:
+                gid = str(g.vk_group_id).lstrip("-")
+                if gid in admin_ids:
+                    lines.append(f"✅ {g.group_name}")
+                else:
+                    lines.append(f"⚠️ {g.group_name} — вы не админ, заявки приниматься не будут")
+            coverage = "\n\nДоступ к настроенным ВК-сообществам:\n" + "\n".join(lines)
+    except Exception:
+        # Diagnostics are best-effort — the token is already saved regardless.
+        pass
+
     await message.answer(
         f"✅ Авторизация ВК сохранена!\n\n"
         f"Пользователь: {vk_name} (id{vk_user_id})\n"
-        f"Теперь заявки в ВК-сообщества будут одобряться автоматически.",
+        f"Теперь заявки в ВК-сообщества будут одобряться автоматически."
+        f"{coverage}",
         reply_markup=ADMIN_MENU_KEYBOARD,
     )
 
@@ -633,6 +677,113 @@ async def admin_set_group_product(message: Message, state: FSMContext) -> None:
 
     await create_current_group(message, invite_link, group_name, product_tag)
     await state.clear()
+
+
+def _format_groups_list(db: Session) -> tuple[str, bool]:
+    """Build a human-readable list of all TG + VK groups.
+
+    Returns (text, has_any). Each group is keyed as ``tg<id>`` / ``vk<id>`` so the
+    admin can delete it by sending that key.
+    """
+    tg_groups = db.query(CurrentGroup).order_by(CurrentGroup.id.asc()).all()
+    vk_groups = db.query(VkGroup).order_by(VkGroup.id.asc()).all()
+
+    lines: list[str] = []
+    if tg_groups:
+        lines.append("📨 Telegram-группы:")
+        for g in tg_groups:
+            tag = g.product_tag or "— (без тега, общая)"
+            lines.append(f"  tg{g.id} | {g.group_name} | тег: {tag}")
+    else:
+        lines.append("📨 Telegram-группы: нет")
+
+    lines.append("")
+    if vk_groups:
+        lines.append("🔵 ВК-группы:")
+        for g in vk_groups:
+            tag = g.product_tag or "— (без тега, общая)"
+            lines.append(f"  vk{g.id} | {g.group_name} | тег: {tag}")
+    else:
+        lines.append("🔵 ВК-группы: нет")
+
+    has_any = bool(tg_groups or vk_groups)
+    return "\n".join(lines), has_any
+
+
+@router.message(F.text == ADMIN_GROUPS)
+async def admin_groups_start(message: Message, state: FSMContext) -> None:
+    if not is_admin(message):
+        return
+    db: Session = SessionLocal()
+    try:
+        listing, has_any = _format_groups_list(db)
+    finally:
+        db.close()
+
+    if not has_any:
+        await message.answer(
+            "Групп пока нет.\n"
+            "Добавь через «Установить группу» / «Установить ВК-группу».",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
+        return
+
+    await state.set_state(AdminStates.delete_group)
+    await message.answer(
+        f"{listing}\n\n"
+        "Чтобы удалить группу — пришли её ключ (например tg3 или vk2).\n"
+        "Удалять стоит завершённые марафоны, чтобы оплаты не попадали в них "
+        "по ошибке.\n\n"
+        "Нажми «Отмена», чтобы просто закрыть список.",
+        reply_markup=CANCEL_KEYBOARD,
+    )
+
+
+@router.message(AdminStates.delete_group)
+async def admin_delete_group(message: Message, state: FSMContext) -> None:
+    if not is_admin(message) or not message.text:
+        return
+
+    text = message.text.strip().lower()
+    if text == ADMIN_CANCEL.lower():
+        await admin_cancel(message, state)
+        return
+
+    kind = None
+    if text.startswith("tg"):
+        kind = "tg"
+    elif text.startswith("vk"):
+        kind = "vk"
+
+    raw_id = text[2:].strip() if kind else ""
+    if not kind or not raw_id.isdigit():
+        await message.answer(
+            "Не понял ключ. Пришли в формате tg<id> или vk<id> "
+            "(например tg3 или vk2), либо «Отмена».",
+        )
+        return
+
+    group_id = int(raw_id)
+    db: Session = SessionLocal()
+    try:
+        model = CurrentGroup if kind == "tg" else VkGroup
+        group = db.query(model).filter(model.id == group_id).first()
+        if not group:
+            await message.answer(
+                f"Группа {kind}{group_id} не найдена. Проверь ключ в списке.",
+            )
+            return
+        name = group.group_name
+        db.delete(group)
+        db.commit()
+    finally:
+        db.close()
+
+    await state.clear()
+    await message.answer(
+        f"Группа {kind}{group_id} «{name}» удалена ✅",
+        reply_markup=ADMIN_MENU_KEYBOARD,
+    )
 
 
 @router.message(F.text == ADMIN_EXPORT_LOGS)
@@ -828,7 +979,7 @@ async def admin_remove_user(message: Message, state: FSMContext) -> None:
     db: Session = SessionLocal()
     try:
         phone, phone_last10 = phone_variants(text)
-        filters = [Payment.email == text, Payment.order_id == text]
+        filters = [func.lower(Payment.email) == text.lower(), Payment.order_id == text]
         if phone:
             filters.append(Payment.phone == phone)
         if phone_last10 and len(phone_last10) >= 10:
@@ -931,7 +1082,7 @@ async def admin_unban_user(message: Message, state: FSMContext) -> None:
     db: Session = SessionLocal()
     try:
         phone, phone_last10 = phone_variants(text)
-        filters = [Payment.email == text, Payment.order_id == text]
+        filters = [func.lower(Payment.email) == text.lower(), Payment.order_id == text]
         if phone:
             filters.append(Payment.phone == phone)
         if phone_last10 and len(phone_last10) >= 10:
