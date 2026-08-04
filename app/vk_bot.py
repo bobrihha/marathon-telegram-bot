@@ -21,9 +21,19 @@ from .config import (
     VK_CONFIRMATION_STRING,
     VK_GROUP_ID,
     VK_SECRET,
+    VK_USER_DIRECT_OK,
+    VK_USER_PROXY,
 )
 from .db.dal import SessionLocal
-from .db.models import AccessLog, CurrentGroup, Payment, User, VkAdminAuth, VkGroup
+from .db.models import (
+    AccessLog,
+    CurrentGroup,
+    Payment,
+    User,
+    VkAdminAuth,
+    VkGroup,
+    VkJoinRequest,
+)
 
 import aiohttp
 
@@ -67,21 +77,93 @@ def _spawn_vk_task(coro) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def vk_api(method: str, access_token: str | None = None, **params) -> dict:
-    """Call VK API method."""
+async def vk_api(
+    method: str,
+    access_token: str | None = None,
+    proxy: str | None = None,
+    timeout: float | None = None,
+    **params,
+) -> dict:
+    """Call VK API method. ``proxy`` (http://user:pass@host:port) routes the
+    request through a proxy — used to make personal-token calls originate from a
+    Russian IP so VK doesn't flag the admin account as hijacked."""
     token = access_token or VK_COMMUNITY_TOKEN
     if not token:
         return {"error": {"error_msg": "VK token is not configured"}}
     params["access_token"] = token
     params["v"] = "5.199"
     url = f"https://api.vk.com/method/{method}"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=params) as resp:
+    session_kwargs = {}
+    if timeout:
+        session_kwargs["timeout"] = aiohttp.ClientTimeout(total=timeout)
+    async with aiohttp.ClientSession(**session_kwargs) as session:
+        async with session.post(url, data=params, proxy=proxy) as resp:
             result = await resp.json()
             logger.info("VK API response for %s: %s", method, result)
             if "error" in result:
                 logger.error("VK API error %s: %s", method, result["error"])
             return result
+
+
+def _vk_user_proxies() -> list[str]:
+    """Parse VK_USER_PROXY (a single URL or a comma-separated list of URLs)."""
+    return [p.strip() for p in VK_USER_PROXY.split(",") if p.strip()]
+
+
+async def _vk_user_api(method: str, **params) -> dict:
+    """Call a VK method that REQUIRES the admin's personal (USER) token.
+
+    VK treats a user token used from a foreign IP as an account hijack and
+    blocks the admin's personal page. Such calls must originate from a Russian
+    IP, so we route them through ``VK_USER_PROXY`` (one or more RU-exit proxy
+    URLs). Residential proxy nodes flake out, so we fail over across the
+    configured proxies until one returns a real VK response.
+
+    If no proxy is configured (and direct is not explicitly allowed via
+    ``VK_USER_DIRECT_OK``), the call is SKIPPED to protect the admin's account.
+    """
+    import random
+
+    admin_token = _get_vk_admin_token()
+    if not admin_token:
+        logger.warning("User-token VK call %s skipped: no admin token", method)
+        return {"error": {"error_code": 5, "error_msg": "no admin token"}}
+
+    proxies = _vk_user_proxies()
+    if not proxies:
+        if VK_USER_DIRECT_OK:
+            return await vk_api(method, access_token=admin_token, **params)
+        logger.warning(
+            "User-token VK call %s PAUSED: VK_USER_PROXY not set "
+            "(protecting admin account from foreign-IP block)",
+            method,
+        )
+        return {
+            "error": {
+                "error_code": -1,
+                "error_msg": "user-token calls paused: no RU proxy configured",
+            }
+        }
+
+    # Spread load and avoid always retrying a dead node first.
+    random.shuffle(proxies)
+    last_err: Exception | None = None
+    for proxy in proxies:
+        try:
+            return await vk_api(
+                method,
+                access_token=admin_token,
+                proxy=proxy,
+                timeout=25,
+                **params,
+            )
+        except Exception as e:  # proxy node down / 503 / timeout — try next
+            last_err = e
+            logger.warning(
+                "VK user call %s via proxy failed (%s); trying next node", method, e
+            )
+    logger.error("VK user call %s: all %d proxies failed (last: %s)", method, len(proxies), last_err)
+    return {"error": {"error_code": -2, "error_msg": f"all proxies failed: {last_err}"}}
 
 
 async def vk_send_message(
@@ -400,7 +482,11 @@ async def configure_vk_callback_server(
         group_id=group_id,
         server_id=server_id,
         api_version="5.199",
-        message_new=1,
+        # Marathon groups: NO message_new — the bot must NOT answer messages in
+        # the marathon group itself (there clients write to a human admin). Only
+        # join events, so the bot can approve join requests by payment. Payment
+        # verification happens in the SEPARATE concierge community (VK_GROUP_ID).
+        message_new=0,
         group_join=1,
         group_leave=1,
     )
@@ -634,7 +720,7 @@ async def handle_payment_check(
             f"можно вступить в любую или в обе:\n\n"
             f"📌 ВК-сообщество: {vk_group.group_name}\n"
             f"Перейдите по ссылке и подайте заявку на вступление — "
-            f"она будет принята автоматически 👇\n"
+            f"администратор одобрит её в ближайшее время 👇\n"
             f"{vk_group.invite_link}"
             f"{tg_info}",
             keyboard=granted_keyboard(),
@@ -764,6 +850,15 @@ async def handle_vk_callback(request: web.Request) -> web.Response:
                 _spawn_vk_task(
                     _check_group_join(vk_user_id, source_group, group_id)
                 )
+
+    elif event_type == "group_leave":
+        obj = data.get("object", {})
+        vk_user_id = obj.get("user_id")
+        if vk_user_id:
+            # User left / declined — drop from the pending checker list.
+            _clear_vk_join_request(vk_user_id, group_id)
+            # Evidentiary record of WHEN this happened — for refund disputes.
+            _record_vk_leave(vk_user_id, group_id, bool(obj.get("self", 0)), source_group)
 
     return web.Response(text="ok")
 
@@ -1060,14 +1155,13 @@ async def _approve_vk_request(
     callback_group_id: object,
 ) -> bool:
     group_id = _normalize_group_id(callback_group_id or (vk_group.vk_group_id if vk_group else None))
-    # groups.approveRequest requires USER token, not community token
-    admin_token = _get_vk_admin_token()
-    if not group_id or not admin_token:
-        logger.warning("Cannot approve VK request: group_id/admin_token missing")
+    if not group_id:
+        logger.warning("Cannot approve VK request: group_id missing")
         return False
-    result = await vk_api(
+    # groups.approveRequest needs the admin USER token, routed via RU proxy
+    # (paused when no proxy is configured — see _vk_user_api).
+    result = await _vk_user_api(
         "groups.approveRequest",
-        access_token=admin_token,
         group_id=group_id,
         user_id=vk_user_id,
     )
@@ -1080,18 +1174,166 @@ async def _remove_vk_user(
     callback_group_id: object,
 ) -> bool:
     group_id = _normalize_group_id(callback_group_id or (vk_group.vk_group_id if vk_group else None))
-    # groups.removeUser requires USER token, not community token
-    admin_token = _get_vk_admin_token()
-    if not group_id or not admin_token:
-        logger.warning("Cannot remove VK user/request: group_id/admin_token missing")
+    if not group_id:
+        logger.warning("Cannot remove VK user/request: group_id missing")
         return False
-    result = await vk_api(
+    # groups.removeUser needs the admin USER token, routed via RU proxy
+    # (paused when no proxy is configured — see _vk_user_api).
+    result = await _vk_user_api(
         "groups.removeUser",
-        access_token=admin_token,
         group_id=group_id,
         user_id=vk_user_id,
     )
     return "response" in result and result["response"] == 1
+
+
+async def _record_vk_join_request(
+    vk_user_id: int,
+    callback_group_id: object,
+    source_group: VkGroup | None,
+) -> None:
+    """Store a pending VK join request for the admin «🔔 Заявки ВК» checker.
+    Uses the community token (users.get) — no user token, so the admin account
+    is never touched."""
+    gid = _normalize_group_id(
+        callback_group_id or (source_group.vk_group_id if source_group else None)
+    )
+    if not gid:
+        return
+    full_name = None
+    try:
+        info = await vk_api(
+            "users.get", user_ids=vk_user_id, access_token=_vk_token(source_group)
+        )
+        arr = info.get("response", [])
+        if arr:
+            full_name = f"{arr[0].get('first_name', '')} {arr[0].get('last_name', '')}".strip()
+    except Exception:
+        pass
+    db: Session = SessionLocal()
+    try:
+        existing = (
+            db.query(VkJoinRequest)
+            .filter(VkJoinRequest.vk_id == str(vk_user_id), VkJoinRequest.vk_group_id == gid)
+            .first()
+        )
+        if existing:
+            existing.status = "pending"
+            existing.created_at = datetime.utcnow()
+            if full_name:
+                existing.full_name = full_name
+        else:
+            db.add(
+                VkJoinRequest(
+                    vk_id=str(vk_user_id),
+                    vk_group_id=gid,
+                    full_name=full_name,
+                    created_at=datetime.utcnow(),
+                    status="pending",
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _clear_vk_join_request(vk_user_id: int, callback_group_id: object) -> None:
+    """Mark a pending VK join request as done (user approved / joined / left)."""
+    gid = _normalize_group_id(callback_group_id)
+    if not gid:
+        return
+    db: Session = SessionLocal()
+    try:
+        rows = (
+            db.query(VkJoinRequest)
+            .filter(
+                VkJoinRequest.vk_id == str(vk_user_id),
+                VkJoinRequest.vk_group_id == gid,
+                VkJoinRequest.status == "pending",
+            )
+            .all()
+        )
+        for r in rows:
+            r.status = "done"
+        if rows:
+            db.commit()
+    finally:
+        db.close()
+
+
+def _record_vk_leave(
+    vk_user_id: int,
+    callback_group_id: object,
+    self_initiated: bool,
+    source_group: VkGroup | None,
+) -> None:
+    """Log the moment a paid member LEAVES or is REMOVED from a marathon VK
+    community — evidentiary record for refund disputes. VK's group_leave event
+    carries no leave timestamp of its own, so we stamp it with the time OUR
+    system received the callback (near-real-time) rather than "whenever an
+    admin happened to notice"."""
+    gid = _normalize_group_id(callback_group_id or (source_group.vk_group_id if source_group else None))
+    db: Session = SessionLocal()
+    try:
+        vk_id_str = str(vk_user_id)
+        user = db.query(User).filter(User.vk_id == vk_id_str).first()
+        payment = user.payment if user and user.payment_id else None
+        group_name = source_group.group_name if source_group else (gid or "VK group")
+        action = "left_vk" if self_initiated else "kicked_vk"
+        comment = (
+            f"vk_id={vk_id_str} "
+            f"{'вышел сам' if self_initiated else 'удалён/исключён администратором'} "
+            f"из «{group_name}»"
+        )
+        log = AccessLog(
+            telegram_id=user.telegram_id if user else None,
+            email=payment.email if payment else None,
+            order_id=payment.order_id if payment else None,
+            group_name=group_name,
+            group_id=gid or "",
+            action=action,
+            timestamp=datetime.utcnow(),
+            comment=comment,
+        )
+        db.add(log)
+        db.commit()
+    finally:
+        db.close()
+
+
+def get_pending_paid_vk_requests(db: Session) -> list[dict]:
+    """Pending VK join requests whose user has a PAID payment matching the
+    community — exactly who the admin should approve. (Used by the TG checker.)"""
+    out: list[dict] = []
+    pending = (
+        db.query(VkJoinRequest)
+        .filter(VkJoinRequest.status == "pending")
+        .order_by(VkJoinRequest.created_at)
+        .all()
+    )
+    for req in pending:
+        user = db.query(User).filter(User.vk_id == req.vk_id).first()
+        if not user or not user.payment_id:
+            continue
+        payment = user.payment
+        if not payment or payment.status != "paid":
+            continue
+        vk_group = (
+            db.query(VkGroup)
+            .filter(VkGroup.vk_group_id == req.vk_group_id)
+            .order_by(VkGroup.id.desc())
+            .first()
+        )
+        if not vk_group or not _vk_group_matches_payment(db, vk_group, payment):
+            continue
+        out.append(
+            {
+                "vk_id": req.vk_id,
+                "full_name": req.full_name or f"id{req.vk_id}",
+                "group_name": vk_group.group_name,
+            }
+        )
+    return out
 
 
 async def _handle_group_join_request(
@@ -1100,6 +1342,8 @@ async def _handle_group_join_request(
     callback_group_id: object,
 ) -> None:
     """Approve a closed-community VK join request only for paid users."""
+    # Capture this pending join request for the admin «🔔 Заявки ВК» checker.
+    await _record_vk_join_request(vk_user_id, callback_group_id, source_group)
     db: Session = SessionLocal()
     try:
         vk_id_str = str(vk_user_id)
@@ -1136,9 +1380,9 @@ async def _handle_group_join_request(
             await vk_send_message(
                 vk_user_id,
                 "Привет! Я получила твою заявку на вступление 🙌\n\n"
-                "Чтобы я приняла её автоматически — напиши мне сюда "
+                "Чтобы попасть в сообщество — напиши мне сюда "
                 "email или номер телефона, который ты указал(а) при оплате.\n\n"
-                "Как только проверю оплату — сразу одобрю заявку.",
+                "После проверки оплаты администратор одобрит твою заявку.",
                 keyboard=main_keyboard(),
                 access_token=_vk_token(source_group),
             )
@@ -1158,12 +1402,10 @@ async def _is_group_manager(vk_user_id: int, group_id: object) -> bool:
     gid = _normalize_group_id(group_id)
     if not gid:
         return False
-    admin_token = _get_vk_admin_token()
-    if not admin_token:
-        return False
-    result = await vk_api(
+    # groups.getMembers(filter=managers) needs the admin USER token, routed via
+    # RU proxy (paused when no proxy is configured — see _vk_user_api).
+    result = await _vk_user_api(
         "groups.getMembers",
-        access_token=admin_token,
         group_id=gid,
         filter="managers",
     )
@@ -1177,6 +1419,8 @@ async def _check_group_join(
     callback_group_id: object = None,
 ) -> None:
     """Check if a new VK group member has a valid payment. Alert admins if not."""
+    # User is now IN the group — clear them from the pending checker list.
+    _clear_vk_join_request(vk_user_id, callback_group_id)
     db: Session = SessionLocal()
     try:
         vk_id_str = str(vk_user_id)

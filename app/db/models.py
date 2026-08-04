@@ -91,3 +91,23 @@ class VkAdminAuth(Base):
     access_token = Column(Text)
     created_at = Column(DateTime)
 
+
+class VkJoinRequest(Base):
+    """Pending VK join requests captured from group_join callbacks — used by the
+    admin "🔔 Заявки ВК" checker so the client can see who (paid) is waiting to be
+    approved into a marathon community. Self-clears when VK reports the user
+    approved/joined/left (status -> 'done')."""
+
+    __tablename__ = "vk_join_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    vk_id = Column(String, index=True)
+    vk_group_id = Column(String, index=True)  # marathon community the request came into
+    full_name = Column(String, nullable=True)
+    created_at = Column(DateTime)
+    status = Column(String, default="pending")  # pending | done
+
+    __table_args__ = (
+        UniqueConstraint("vk_id", "vk_group_id", name="uq_vk_join_request"),
+    )
+

@@ -18,7 +18,7 @@ from aiogram.types import (
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from .config import ADMIN_IDS, BOT_TOKEN, SUPPORT_CONTACT
+from .config import ADMIN_IDS, BOT_TOKEN, SUPPORT_CONTACT, VK_GROUP_ID
 from .db.dal import SessionLocal, init_db
 from .db.models import CurrentGroup, Payment, User, VkGroup
 from .handlers.admin import ADMIN_MENU, ADMIN_MENU_BUTTONS, ADMIN_MENU_KEYBOARD, router as admin_router
@@ -388,8 +388,11 @@ async def _resend_access_links(message: Message, db: Session, payment: Payment) 
     if vk_group and vk_group.invite_link:
         vk_button_url = vk_group.invite_link
         vk_button_text = "Вступить в ВК-группу 🔐"
-        if vk_group.access_token and vk_group.vk_group_id and vk_group.vk_group_id != "chat":
-            vk_button_url = f"https://vk.com/im?sel=-{str(vk_group.vk_group_id).lstrip('-')}"
+        if VK_GROUP_ID and vk_group.vk_group_id and vk_group.vk_group_id != "chat":
+            # Route to the CONCIERGE community (bot lives there), NOT the marathon
+            # group itself. The marathon group has no bot in its messages — there
+            # clients write to a human admin.
+            vk_button_url = f"https://vk.com/im?sel=-{VK_GROUP_ID}"
             vk_button_text = "Открыть ВК-бота 🔐"
             vk_requires_bot_check = True
         buttons.append(
@@ -407,9 +410,9 @@ async def _resend_access_links(message: Message, db: Session, payment: Payment) 
             "Для Телеграм — перейдите по ссылке и подайте заявку в группу, "
             "она будет принята автоматически.\n\n"
             "Для ВК — откройте сообщения сообщества (кнопка «Открыть ВК-бота») "
-            "и обязательно напишите туда тот же email или телефон, "
-            "который указали при оплате. Только после этого я смогу "
-            "автоматически принять заявку в ВК-сообщество."
+            "и напишите туда email или телефон, который указали при оплате. "
+            "После проверки оплаты администратор одобрит вашу заявку "
+            "в ВК-сообщество."
         )
 
     await message.answer(
@@ -608,8 +611,11 @@ async def handle_email_or_order(message: Message) -> None:
         if vk_group and vk_group.invite_link:
             vk_button_url = vk_group.invite_link
             vk_button_text = "Вступить в ВК-группу 🔐"
-            if vk_group.access_token and vk_group.vk_group_id and vk_group.vk_group_id != "chat":
-                vk_button_url = f"https://vk.com/im?sel=-{str(vk_group.vk_group_id).lstrip('-')}"
+            if VK_GROUP_ID and vk_group.vk_group_id and vk_group.vk_group_id != "chat":
+                # Route to the CONCIERGE community (bot lives there), NOT the
+                # marathon group itself. The marathon group has no bot in its
+                # messages — there clients write to a human admin.
+                vk_button_url = f"https://vk.com/im?sel=-{VK_GROUP_ID}"
                 vk_button_text = "Открыть ВК-бота 🔐"
                 vk_requires_bot_check = True
             buttons.append(
@@ -632,9 +638,9 @@ async def handle_email_or_order(message: Message) -> None:
                 "Для Телеграм — перейдите по ссылке и подайте заявку в группу, "
                 "она будет принята автоматически.\n\n"
                 "Для ВК — откройте сообщения сообщества (кнопка «Открыть ВК-бота») "
-                "и обязательно напишите туда тот же email или телефон, "
-                "который указали при оплате. Только после этого я смогу "
-                "автоматически принять заявку в ВК-сообщество."
+                "и напишите туда email или телефон, который указали при оплате. "
+                "После проверки оплаты администратор одобрит вашу заявку "
+                "в ВК-сообщество."
             )
 
         await message.answer(

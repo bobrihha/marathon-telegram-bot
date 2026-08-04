@@ -1,12 +1,21 @@
 from datetime import datetime
 
 from aiogram import F, Router
-from aiogram.types import ChatJoinRequest
+from aiogram.enums import ChatMemberStatus
+from aiogram.types import ChatJoinRequest, ChatMemberUpdated
 
 from ..db.dal import SessionLocal
 from ..db.models import AccessLog, CurrentGroup, User
 
 router = Router()
+
+_WAS_IN_CHAT = {
+    ChatMemberStatus.MEMBER,
+    ChatMemberStatus.ADMINISTRATOR,
+    ChatMemberStatus.CREATOR,
+    ChatMemberStatus.RESTRICTED,
+}
+_NOW_LEFT = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
 
 
 @router.chat_join_request(F.chat)
@@ -57,15 +66,15 @@ async def approve_join_request(event: ChatJoinRequest) -> None:
             if current_group:
                 logging.info("Using untagged fallback group %s", current_group.id)
                 
+        # NO "last-resort: any group" fallback. Approving into the newest group
+        # regardless of product let a returning buyer whose linked payment is for
+        # an OLD/other product (or empty) slip into the current marathon unpaid.
+        # If the payment product matches no configured group, do NOT approve.
         if not current_group:
-            current_group = (
-                db.query(CurrentGroup).order_by(CurrentGroup.id.desc()).first()
+            logging.warning(
+                "NOT approving user %s: payment product '%s' (order %s) matches no configured group — leaving pending",
+                tg_id, product, payment.order_id,
             )
-            if current_group:
-                logging.info("Using last resort group %s", current_group.id)
-
-        if not current_group:
-            logging.error("No groups found in database at all")
             return
 
         # Check if this group record is already bound to a DIFFERENT chat
@@ -107,5 +116,62 @@ async def approve_join_request(event: ChatJoinRequest) -> None:
         
     except Exception as e:
         logging.exception("Error in approve_join_request: %s", e)
+    finally:
+        db.close()
+
+
+@router.chat_member()
+async def track_member_leave(event: ChatMemberUpdated) -> None:
+    """Log the exact moment a paid member LEAVES or is REMOVED from a marathon
+    TG group. Evidentiary record for refund disputes: uses Telegram's own
+    event timestamp (event.date), not "whenever we happened to notice", and
+    records who initiated it (the member themselves vs an admin)."""
+    import logging
+
+    old_status = event.old_chat_member.status
+    new_status = event.new_chat_member.status
+    if not (old_status in _WAS_IN_CHAT and new_status in _NOW_LEFT):
+        return
+
+    member = event.new_chat_member.user
+    tg_id = str(member.id)
+    chat_id = str(event.chat.id)
+    chat_title = str(event.chat.title or chat_id)
+
+    actor = event.from_user
+    self_initiated = bool(actor and str(actor.id) == tg_id)
+    action = "left_tg" if self_initiated else "kicked_tg"
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == tg_id).first()
+        payment = user.payment if user and user.payment_id else None
+
+        actor_label = "себя (вышел сам)" if self_initiated else (
+            f"{actor.full_name} (id {actor.id})" if actor else "неизвестно"
+        )
+        comment = (
+            f"{member.full_name} (@{member.username or '-'}) статус стал "
+            f"'{new_status}' в «{chat_title}»; инициатор: {actor_label}"
+        )
+        event_ts = event.date.replace(tzinfo=None) if event.date.tzinfo else event.date
+
+        log = AccessLog(
+            telegram_id=tg_id,
+            email=payment.email if payment else None,
+            order_id=payment.order_id if payment else None,
+            group_name=chat_title,
+            group_id=chat_id,
+            action=action,
+            timestamp=event_ts,
+            comment=comment,
+        )
+        db.add(log)
+        db.commit()
+        logging.info(
+            "Logged %s for user %s in chat %s at %s", action, tg_id, chat_id, event_ts
+        )
+    except Exception as e:
+        logging.exception("Error in track_member_leave: %s", e)
     finally:
         db.close()

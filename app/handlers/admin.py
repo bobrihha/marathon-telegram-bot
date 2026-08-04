@@ -29,6 +29,7 @@ ADMIN_UNBAN_USER = "Разбанить участника"
 ADMIN_STATS = "📊 Статистика"
 ADMIN_VK_AUDIT = "🔍 Аудит ВК"
 ADMIN_VK_AUTH = "🔑 Авторизация ВК"
+ADMIN_VK_REQUESTS = "🔔 Заявки ВК"
 ADMIN_CANCEL = "Отмена"
 
 ADMIN_MENU_BUTTONS = {
@@ -44,11 +45,13 @@ ADMIN_MENU_BUTTONS = {
     ADMIN_STATS,
     ADMIN_VK_AUDIT,
     ADMIN_VK_AUTH,
+    ADMIN_VK_REQUESTS,
     ADMIN_CANCEL,
 }
 
 ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
+        [KeyboardButton(text=ADMIN_VK_REQUESTS)],
         [KeyboardButton(text=ADMIN_STATS), KeyboardButton(text=ADMIN_VK_AUDIT)],
         [KeyboardButton(text=ADMIN_SET_GROUP)],
         [KeyboardButton(text=ADMIN_SET_VK_GROUP)],
@@ -111,6 +114,42 @@ async def send_admin_menu(message: Message) -> None:
     await message.answer("Админ-меню:", reply_markup=ADMIN_MENU_KEYBOARD)
 
 
+@router.message(F.chat.type == "private", F.text == ADMIN_VK_REQUESTS)
+async def admin_vk_requests(message: Message) -> None:
+    """Show paid VK members waiting to be approved into a marathon community.
+    The client approves them in VK manually; the list self-clears when VK
+    reports them joined/left."""
+    if not is_admin(message):
+        return
+    from ..vk_bot import get_pending_paid_vk_requests
+
+    db: Session = SessionLocal()
+    try:
+        items = get_pending_paid_vk_requests(db)
+    finally:
+        db.close()
+
+    if not items:
+        await message.answer(
+            "🔔 Оплативших заявок на вступление в ВК сейчас нет.\n\n"
+            "Как только оплативший подаст заявку в ВК-сообщество — "
+            "он появится здесь.",
+            reply_markup=ADMIN_MENU_KEYBOARD,
+        )
+        return
+
+    lines = [f"🔔 Ждут принятия в ВК (оплатили): {len(items)}\n"]
+    for i, it in enumerate(items[:50], 1):
+        lines.append(
+            f"{i}. {it['full_name']} — vk.com/id{it['vk_id']}\n"
+            f"   └ {it['group_name']}"
+        )
+    if len(items) > 50:
+        lines.append(f"\n…и ещё {len(items) - 50} (покажутся после принятия текущих)")
+    lines.append("\n✅ Примите их в ВК — из списка они пропадут сами.")
+    await message.answer("\n".join(lines), reply_markup=ADMIN_MENU_KEYBOARD)
+
+
 async def send_payment_info(message: Message, query: str) -> None:
     db: Session = SessionLocal()
     try:
@@ -131,16 +170,17 @@ async def send_payment_info(message: Message, query: str) -> None:
             return
 
         user = payment.user
+        log_filters = [
+            AccessLog.email == payment.email,
+            AccessLog.order_id == payment.order_id,
+        ]
+        if user and user.telegram_id:
+            log_filters.append(AccessLog.telegram_id == user.telegram_id)
         logs = (
             db.query(AccessLog)
-            .filter(
-                or_(
-                    AccessLog.email == payment.email,
-                    AccessLog.order_id == payment.order_id,
-                )
-            )
-            .order_by(AccessLog.timestamp.desc())
-            .limit(5)
+            .filter(or_(*log_filters))
+            .order_by(AccessLog.timestamp.asc())
+            .limit(30)
             .all()
         )
 
@@ -169,7 +209,7 @@ async def send_payment_info(message: Message, query: str) -> None:
 
         if logs:
             lines.append("")
-            lines.append("Последние логи доступа:")
+            lines.append("История доступа (по времени, включая вступление/выход из групп):")
             for log in logs:
                 timestamp = log.timestamp.isoformat(sep=" ", timespec="seconds")
                 lines.append(

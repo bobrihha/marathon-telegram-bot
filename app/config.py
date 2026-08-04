@@ -23,6 +23,16 @@ VK_CALLBACK_URL = os.getenv(
 SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "")
 
 
+# VK personal (user) token routing.
+# approveRequest / removeUser / getMembers(managers) require the admin's USER
+# token. VK treats that token used from a FOREIGN IP as an account hijack and
+# blocks the admin's personal page (the bot server is in Amsterdam). Route those
+# calls through a Russian proxy. When VK_USER_PROXY is empty, such calls are
+# SKIPPED (paused) to protect the admin's account — unless VK_USER_DIRECT_OK=1
+# explicitly allows direct (e.g. when the bot itself runs on a RU server).
+VK_USER_PROXY = os.getenv("VK_USER_PROXY", "").strip()
+VK_USER_DIRECT_OK = os.getenv("VK_USER_DIRECT_OK", "").strip().lower() in {"1", "true", "yes"}
+
 # VK Bot settings
 VK_COMMUNITY_TOKEN = os.getenv("VK_COMMUNITY_TOKEN", "")
 VK_GROUP_ID = int(os.getenv("VK_GROUP_ID", "0"))
