@@ -586,6 +586,30 @@ async def handle_payment_check(
                         access_token=access_token,
                     )
                     return
+                elif existing_user is None:
+                    # Orphaned used payment (used=1, no user row points at it —
+                    # seen in prod 2026-08-14). Re-attach to this VK user who
+                    # just proved ownership, then resend the links, same
+                    # recovery as the TG side.
+                    logger.warning(
+                        "VK check vk=%s: ORPHANED used payment %s (%s) — re-attaching",
+                        vk_id_str, used_payment.order_id, used_payment.product_name,
+                    )
+                    orphan_owner = (
+                        db.query(User).filter(User.vk_id == vk_id_str).first()
+                    )
+                    if orphan_owner:
+                        orphan_owner.payment_id = used_payment.id
+                    else:
+                        db.add(User(vk_id=vk_id_str, payment_id=used_payment.id))
+                    db.commit()
+                    await _resend_granted_links(
+                        vk_user_id=vk_user_id,
+                        payment=used_payment,
+                        db=db,
+                        access_token=access_token,
+                    )
+                    return
                 else:
                     # Payment already used — no re-issue
                     await vk_send_message(
@@ -650,7 +674,15 @@ async def handle_payment_check(
                     user.telegram_id = existing_telegram_id
                     user.username = existing_username
                     user.full_name = existing_full_name
+                logger.info(
+                    "VK grant vk=%s: merging duplicate user_id=%s (its payment link cleared)",
+                    vk_id_str, existing_user.id,
+                )
                 existing_user.payment_id = None
+            logger.info(
+                "VK grant vk=%s: payment %s (%s); previous linked payment_id=%s",
+                vk_id_str, payment.order_id, payment.product_name, user.payment_id,
+            )
             user.payment_id = payment.id
 
         payment.used = True

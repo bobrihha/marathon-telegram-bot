@@ -323,6 +323,23 @@ async def rebind_payment_to_user(
         new_user.payment_id = payment.id
         payment.used = True
 
+        # Audit trail: admin rebinds are the prime suspect for "orphaned" used
+        # payments (wrong/typo'd telegram_id creates a ghost user; picking the
+        # newest payment by key may grab the wrong order). Log everything.
+        import logging
+        logging.getLogger(__name__).info(
+            "ADMIN REBIND: key='%s' -> tg %s | payment %s (%s, used->True) | "
+            "old owner: user_id=%s tg=%s vk=%s | new user existed=%s",
+            payment_key,
+            telegram_id,
+            payment.order_id,
+            payment.product_name,
+            old_user.id if old_user else None,
+            old_user.telegram_id if old_user else None,
+            old_user.vk_id if old_user else None,
+            bool(new_user.id),
+        )
+
         db.commit()
         await message.answer(
             f"Оплата {payment.order_id} привязана к Telegram ID {telegram_id}.",

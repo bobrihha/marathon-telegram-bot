@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from .config import ADMIN_IDS, BOT_TOKEN, SUPPORT_CONTACT, VK_GROUP_ID
 from .db.dal import SessionLocal, init_db
-from .db.models import CurrentGroup, Payment, User, VkGroup
+from .db.models import AccessLog, CurrentGroup, Payment, User, VkGroup
 from .handlers.admin import ADMIN_MENU, ADMIN_MENU_BUTTONS, ADMIN_MENU_KEYBOARD, router as admin_router
 from .handlers.join_requests import router as join_router
 from .webhooks import start_webhook_server, stop_webhook_server
@@ -322,6 +322,43 @@ async def handle_admin_reply(message: Message, state: FSMContext) -> None:
         await state.clear()
 
 
+async def _approve_pending_tg_request(
+    message: Message, db: Session, payment: Payment, current_group: CurrentGroup
+) -> None:
+    """If the user ALREADY sent a join request to the target TG group (e.g. via
+    the group invite link from the payment email BEFORE verifying in the bot),
+    approve it right away. Normally approval happens only on the join-request
+    event itself — so a request submitted before verification would hang
+    forever, and the user had to cancel + resubmit (or "delete the bot and
+    start over", as buyers actually did)."""
+    if not current_group.chat_id or not message.from_user:
+        return
+    try:
+        await message.bot.approve_chat_join_request(
+            chat_id=int(current_group.chat_id),
+            user_id=message.from_user.id,
+        )
+    except Exception:
+        return  # no pending request — the usual case
+    db.add(
+        AccessLog(
+            telegram_id=str(message.from_user.id),
+            email=payment.email,
+            order_id=payment.order_id,
+            group_name=current_group.group_name,
+            group_id=current_group.chat_id,
+            action="granted",
+            timestamp=datetime.utcnow(),
+            comment="Approved pending join request after payment check",
+        )
+    )
+    db.commit()
+    logging.getLogger(__name__).info(
+        "Approved pending TG join request for %s after payment check",
+        message.from_user.id,
+    )
+
+
 async def _resend_access_links(message: Message, db: Session, payment: Payment) -> None:
     """Re-send the access links for a user who already redeemed this payment.
 
@@ -356,6 +393,10 @@ async def _resend_access_links(message: Message, db: Session, payment: Payment) 
             "Если что-то не так — напиши в поддержку."
         )
         return
+
+    # Unstick a join request they may have already submitted (e.g. from the
+    # e-mail invite link) before verifying here.
+    await _approve_pending_tg_request(message, db, payment, current_group)
 
     vk_group = None
     if product:
@@ -420,7 +461,10 @@ async def _resend_access_links(message: Message, db: Session, payment: Payment) 
         "Высылаю ссылки ещё раз:\n\n"
         f"📌 Телеграм-группа: {current_group.group_name}"
         f"{vk_info}\n\n"
-        f"{next_step}",
+        f"{next_step}\n\n"
+        "⏳ Только что оплатили НОВЫЙ марафон, а я даю не его? "
+        "Информация об оплате доходит до меня с задержкой в пару минут — "
+        "подождите немного и отправьте номер ещё раз.",
         reply_markup=kb,
     )
 
@@ -441,6 +485,14 @@ async def handle_email_or_order(message: Message) -> None:
     if not text:
         await message.answer("Отправь, пожалуйста, email, телефон или номер заказа.")
         return
+
+    # TG incoming was previously NOT logged at all — that blind spot made prod
+    # incidents (orphaned payments, "old link" complaints) undiagnosable.
+    log = logging.getLogger(__name__)
+    log.info(
+        "TG payment check: tg=%s @%s text='%s'",
+        message.from_user.id, message.from_user.username, text,
+    )
 
     db: Session = SessionLocal()
     try:
@@ -486,11 +538,22 @@ async def handle_email_or_order(message: Message) -> None:
                 .first()
             )
 
+        log.info(
+            "TG check tg=%s: unused=%s used_recent=%s(%s)",
+            message.from_user.id,
+            payment.order_id if payment else None,
+            used_payment.order_id if used_payment else None,
+            used_payment.product_name if used_payment else None,
+        )
         if not payment:
             if used_payment:
                 existing_user = db.query(User).filter(User.payment_id == used_payment.id).first()
                 if existing_user and existing_user.telegram_id and existing_user.telegram_id != str(message.from_user.id):
                     # Payment genuinely used by a DIFFERENT TG user
+                    log.info(
+                        "TG check tg=%s: payment %s BLOCKED, linked to other tg=%s",
+                        message.from_user.id, used_payment.order_id, existing_user.telegram_id,
+                    )
                     await message.answer(
                         "Эта оплата уже использована другим пользователем.\n"
                         "Каждая оплата даёт доступ одному человеку.\n"
@@ -499,12 +562,46 @@ async def handle_email_or_order(message: Message) -> None:
                     return
                 # Allow VK→TG bridge: user paid via VK, first time in TG
                 if existing_user and existing_user.vk_id and not existing_user.telegram_id:
+                    log.info(
+                        "TG check tg=%s: VK->TG bridge on payment %s (vk=%s)",
+                        message.from_user.id, used_payment.order_id, existing_user.vk_id,
+                    )
                     payment = used_payment
                 else:
-                    # Payment already redeemed by THIS user — instead of a
-                    # dead-end "ссылка выдаётся один раз", re-send the working
-                    # link to the current group so they don't tap stale invite
-                    # buttons from older marathons sitting in the chat history.
+                    # Payment already redeemed. If NOBODY is linked to it
+                    # (orphaned used payment — seen in prod 2026-08-14: used=1
+                    # but no user row points at it), re-attach it to the person
+                    # who just proved ownership by naming its phone/email —
+                    # otherwise their join requests are never auto-approved
+                    # while the bot keeps replying "у тебя уже есть доступ".
+                    if existing_user is None:
+                        log.warning(
+                            "TG check tg=%s: ORPHANED used payment %s (%s) — re-attaching",
+                            message.from_user.id, used_payment.order_id, used_payment.product_name,
+                        )
+                        orphan_owner = (
+                            db.query(User)
+                            .filter(User.telegram_id == str(message.from_user.id))
+                            .first()
+                        )
+                        if orphan_owner:
+                            orphan_owner.payment_id = used_payment.id
+                        else:
+                            db.add(
+                                User(
+                                    telegram_id=str(message.from_user.id),
+                                    username=message.from_user.username,
+                                    full_name=message.from_user.full_name,
+                                    payment_id=used_payment.id,
+                                )
+                            )
+                        db.commit()
+                    # Re-send the working link to the current group so they
+                    # don't tap stale invite buttons from older marathons.
+                    log.info(
+                        "TG check tg=%s: RESEND links for payment %s (%s)",
+                        message.from_user.id, used_payment.order_id, used_payment.product_name,
+                    )
                     await _resend_access_links(message, db, used_payment)
                     return
 
@@ -551,7 +648,16 @@ async def handle_email_or_order(message: Message) -> None:
                     existing_user.vk_id = None
                     db.flush()
                     user.vk_id = existing_vk_id
+                log.info(
+                    "TG grant tg=%s: merging duplicate user_id=%s (its payment link cleared)",
+                    message.from_user.id, existing_user.id,
+                )
                 existing_user.payment_id = None
+            log.info(
+                "TG grant tg=%s: payment %s (%s); previous linked payment_id=%s",
+                message.from_user.id, payment.order_id, payment.product_name,
+                user.payment_id,
+            )
             user.payment_id = payment.id
             user.username = message.from_user.username
             user.full_name = message.from_user.full_name
@@ -596,6 +702,10 @@ async def handle_email_or_order(message: Message) -> None:
             vk_group = db.query(VkGroup).order_by(VkGroup.id.desc()).first()
 
         db.commit()
+
+        # Unstick a join request they may have already submitted (e.g. from
+        # the e-mail invite link) before verifying here.
+        await _approve_pending_tg_request(message, db, payment, current_group)
 
         # Build keyboard with both links
         buttons = [
